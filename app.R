@@ -49,6 +49,10 @@ app_css <- tags$style(HTML(sprintf("
   }
   .card { box-shadow: 0 2px 10px rgba(74, 53, 64, 0.06); border: 1px solid #F1DDE2; }
   .card-header { background-color: #FBEFF1; font-weight: 600; border-bottom: 1px solid #F1DDE2; }
+  /* bslib clips card content to its rounded corners by default, which cuts
+     off a select dropdown's flyout menu - only cards holding a dropdown
+     that needs to open past the card's edge opt out of that clipping. */
+  .dropdown-card { overflow: visible !important; }
   body {
     background-image: url('%s');
     background-repeat: no-repeat;
@@ -71,6 +75,67 @@ ui <- page_navbar(
     card(
       card_header("Progress & deadlines"),
       uiOutput("progress_bars")
+    )
+  ),
+
+  nav_panel(
+    "Project details",
+    card(
+      class = "dropdown-card",
+      card_header("Choose a project to view or edit"),
+      selectizeInput("detail_project", "Project", choices = NULL, options = list(dropdownParent = "body"))
+    ),
+    card(
+      card_header("Details"),
+      p("Editing here updates this project in place - it will not create a duplicate."),
+      uiOutput("detail_colour_swatch"),
+      strong("Progress by stage"),
+      p(style = "font-size:12px; color:#8A6E78; margin-bottom:4px;", "One numbered segment per stage, coloured in by how complete it is - see the key below the bar for what each number is."),
+      uiOutput("detail_stage_bar"),
+      layout_columns(
+        col_widths = c(6, 6),
+        textInput("detail_name", "Name"),
+        textInput("detail_designer", "Designer")
+      ),
+      layout_columns(
+        col_widths = c(4, 4, 4),
+        selectizeInput("detail_weight", "Yarn weight", choices = YARN_WEIGHTS, options = list(create = TRUE)),
+        textInput("detail_needle", "Needle size"),
+        textInput("detail_gauge", "Gauge (e.g. '22 sts x 30 rows = 4in')")
+      ),
+      layout_columns(
+        col_widths = c(6, 6),
+        textInput("detail_size", "Size"),
+        textInput("detail_colour", "Yarn colour (hex)")
+      ),
+      layout_columns(
+        col_widths = c(4, 4, 4),
+        dateInput("detail_pattern_received", "Pattern received date"),
+        dateInput("detail_start_date", "Start date"),
+        dateInput("detail_deadline", "Deadline")
+      ),
+      layout_columns(
+        col_widths = c(6, 6),
+        selectInput("detail_status", "Status", choices = c("active", "pending", "finished")),
+        checkboxInput("detail_ravelry", "Ravelry project page made?")
+      ),
+      textAreaInput("detail_notes", "Notes"),
+      actionButton("detail_submit", "Save changes", class = "btn-primary")
+    ),
+    card(
+      card_header("Add a new project"),
+      textInput("np_name", "Name"),
+      textInput("np_designer", "Designer"),
+      selectizeInput("np_weight", "Yarn weight", choices = YARN_WEIGHTS, options = list(create = TRUE, placeholder = "pick or type e.g. 'sport (held: fingering + lace)'")),
+      textInput("np_needle", "Needle size (actual, not just recommended)"),
+      textInput("np_gauge", "Gauge (e.g. '22 sts x 30 rows = 4in')"),
+      textInput("np_size", "Size you're making"),
+      textInput("np_colour", "Yarn colour, as a hex code (used for its progress bar)", value = "#C9789A", placeholder = "e.g. #2F4F3A for bottle green"),
+      dateInput("np_pattern_received", "Pattern received date", value = Sys.Date()),
+      dateInput("np_start_date", "Start date (leave as today if not cast on yet)", value = Sys.Date()),
+      dateInput("np_deadline", "Deadline"),
+      textAreaInput("np_notes", "Notes"),
+      actionButton("np_submit", "Add project", class = "btn-primary")
     )
   ),
 
@@ -135,33 +200,25 @@ ui <- page_navbar(
   ),
 
   nav_panel(
-    "Manage projects & stages",
-    layout_columns(
-      col_widths = c(6, 6),
-      card(
-        card_header("Add a new project"),
-        textInput("np_name", "Name"),
-        textInput("np_designer", "Designer"),
-        selectizeInput("np_weight", "Yarn weight", choices = YARN_WEIGHTS, options = list(create = TRUE, placeholder = "pick or type e.g. 'sport (held: fingering + lace)'")),
-        textInput("np_needle", "Needle size (actual, not just recommended)"),
-        textInput("np_size", "Size you're making"),
-        textInput("np_colour", "Yarn colour, as a hex code (used for its progress bar)", value = "#C9789A", placeholder = "e.g. #2F4F3A for bottle green"),
-        dateInput("np_pattern_received", "Pattern received date", value = Sys.Date()),
-        dateInput("np_start_date", "Start date (leave as today if not cast on yet)", value = Sys.Date()),
-        dateInput("np_deadline", "Deadline"),
-        textAreaInput("np_notes", "Notes"),
-        actionButton("np_submit", "Add project", class = "btn-primary")
-      ),
-      card(
-        card_header("Add a stage to a project"),
+    "Manage stages",
+    card(
+      card_header("Add a stage to a project"),
+      layout_columns(
+        col_widths = c(6, 6),
         selectInput("ns_project", "Project", choices = NULL),
-        textInput("ns_name", "Stage name"),
-        numericInput("ns_order", "Order", value = 1, min = 1, step = 1),
+        textInput("ns_name", "Stage name")
+      ),
+      layout_columns(
+        col_widths = c(6, 6),
         sliderInput("ns_portability", PORTABILITY_LABEL, min = 1, max = 3, value = 2),
-        sliderInput("ns_focus", FOCUS_LABEL, min = 1, max = 3, value = 2),
+        sliderInput("ns_focus", FOCUS_LABEL, min = 1, max = 3, value = 2)
+      ),
+      layout_columns(
+        col_widths = c(3, 3, 3, 3),
+        numericInput("ns_order", "Order", value = 1, min = 1, step = 1),
         numericInput("ns_est_hours", "Estimated hours (optional)", value = NA, min = 0, step = 0.5),
-        numericInput("ns_total_rows", "Total rows in chart (optional, for row-by-row tracking)", value = NA, min = 1, step = 1),
-        actionButton("ns_submit", "Add stage", class = "btn-primary")
+        numericInput("ns_total_rows", "Total rows in chart (optional)", value = NA, min = 1, step = 1),
+        div(class = "align-with-input", actionButton("ns_submit", "Add stage", class = "btn-primary"))
       )
     ),
     card(
@@ -189,20 +246,6 @@ ui <- page_navbar(
         numericInput("edit_est_hours", "Estimated hours", value = NA, min = 0, step = 0.5),
         numericInput("edit_total_rows", "Total rows in chart", value = NA, min = 1, step = 1),
         div(class = "align-with-input", actionButton("edit_submit", "Save changes", class = "btn-primary"))
-      )
-    ),
-    card(
-      height = "400px",
-      card_header("Ravelry project pages"),
-      DTOutput("ravelry_table")
-    ),
-    card(
-      height = "220px",
-      card_header("Mark a Ravelry project as created"),
-      layout_columns(
-        col_widths = c(6, 6),
-        selectInput("rav_project", "Project", choices = NULL),
-        div(class = "align-with-input", actionButton("rav_submit", "Mark Ravelry project as created", class = "btn-secondary"))
       )
     )
   ),
@@ -234,13 +277,122 @@ server <- function(input, output, session) {
   stages_r   <- reactive({ refresh(); read_stages() })
   sessions_r <- reactive({ refresh(); read_sessions() })
 
-  # keep project/stage dropdowns in sync with the underlying data
+  # Keep project dropdowns in sync with the underlying data. Rebuilding
+  # choices without re-selecting the current value would otherwise silently
+  # reset each dropdown to its first option on every refresh (e.g. right
+  # after saving an edit).
   observe({
     p <- projects_r()
     choices <- setNames(p$project_id, p$name)
-    updateSelectInput(session, "log_project", choices = choices)
-    updateSelectInput(session, "ns_project", choices = choices)
-    updateSelectInput(session, "rav_project", choices = choices)
+    # finished projects are done with, so they're left out of "add a stage"
+    # - but still findable via Project details, Analytics, and Log a session
+    not_finished <- p %>% filter(status != "finished")
+    not_finished_choices <- setNames(not_finished$project_id, not_finished$name)
+
+    updateSelectInput(session, "log_project", choices = choices, selected = input$log_project)
+    updateSelectInput(session, "ns_project", choices = not_finished_choices, selected = input$ns_project)
+    updateSelectInput(session, "detail_project", choices = choices, selected = input$detail_project)
+  })
+
+  # load the selected project's current values into the edit form
+  observeEvent(input$detail_project, {
+    req(input$detail_project)
+    proj <- projects_r() %>% filter(project_id == input$detail_project)
+    if (nrow(proj) == 0) {
+      return(NULL)
+    }
+    proj <- proj[1, ]
+
+    updateTextInput(session, "detail_name", value = proj$name)
+    updateTextInput(session, "detail_designer", value = proj$designer)
+    updateSelectizeInput(session, "detail_weight", selected = proj$yarn_weight)
+    updateTextInput(session, "detail_needle", value = proj$needle_size)
+    updateTextInput(session, "detail_gauge", value = proj$gauge)
+    updateTextInput(session, "detail_size", value = proj$size)
+    updateTextInput(session, "detail_colour", value = proj$colour)
+    # updateDateInput(value = NULL) is silently dropped rather than clearing
+    # the field (it leaves whatever the previous project showed on screen),
+    # so a missing date is set directly via the lower-level input message
+    # instead - the same mechanism updateDateInput itself uses, just without
+    # its NULL-means-skip behaviour.
+    set_date_field <- function(input_id, date_value) {
+      if (is.na(date_value)) {
+        session$sendInputMessage(input_id, list(value = ""))
+      } else {
+        updateDateInput(session, input_id, value = date_value)
+      }
+    }
+    set_date_field("detail_pattern_received", proj$pattern_received)
+    set_date_field("detail_start_date", proj$start_date)
+    set_date_field("detail_deadline", proj$deadline)
+    updateSelectInput(session, "detail_status", selected = proj$status)
+    updateCheckboxInput(session, "detail_ravelry", value = isTRUE(proj$ravelry_project))
+    updateTextAreaInput(session, "detail_notes", value = proj$notes)
+  })
+
+  output$detail_colour_swatch <- renderUI({
+    req(input$detail_colour)
+    div(style = paste0(
+      "width:28px; height:28px; border-radius:50%; margin-bottom:12px;",
+      "background:", input$detail_colour, "; border:1px solid #F1DDE2;"
+    ))
+  })
+
+  # A numbered segment per stage, coloured in by how complete it is. Native
+  # HTML title tooltips are unreliable/hard to discover, so the stage names
+  # are shown in a plain-text legend below the bar instead of relying on
+  # hover.
+  output$detail_stage_bar <- renderUI({
+    req(input$detail_project)
+    st <- stages_r() %>% filter(project_id == input$detail_project) %>% arrange(stage_order)
+    if (nrow(st) == 0) {
+      return(p(em("No stages added yet for this project.")))
+    }
+    bar_colour <- if (!is.null(input$detail_colour) && nzchar(input$detail_colour)) input$detail_colour else "#C9789A"
+
+    segments <- lapply(seq_len(nrow(st)), function(i) {
+      row <- st[i, ]
+      frac <- case_when(
+        row$status == "done" ~ 1,
+        row$status == "in_progress" & !is.na(row$total_rows) & row$total_rows > 0 ~
+          coalesce(row$rows_done, 0) / row$total_rows,
+        row$status == "in_progress" ~ 0.5,
+        TRUE ~ 0
+      )
+      pct <- round(frac * 100)
+      div(
+        style = paste0(
+          "position:relative; flex:1; height:22px; margin:0 2px; border-radius:6px; overflow:hidden;",
+          "background:#F1DDE2; border:1px solid #F1DDE2;"
+        ),
+        div(style = paste0("background:", bar_colour, "; width:", pct, "%; height:100%;")),
+        div(
+          style = "position:absolute; inset:0; display:flex; align-items:center; justify-content:center; font-size:11px; font-weight:600; color:#4A3540; text-shadow:0 0 3px white, 0 0 3px white;",
+          row$stage_order
+        )
+      )
+    })
+
+    legend <- paste0(
+      st$stage_order, ". ", st$stage_name, " [", st$status, "]",
+      collapse = "  •  "
+    )
+
+    tagList(
+      div(style = "display:flex; margin-bottom:6px;", segments),
+      p(style = "font-size:12px; color:#8A6E78;", legend)
+    )
+  })
+
+  observeEvent(input$detail_submit, {
+    req(input$detail_project)
+    edit_project(
+      input$detail_project, input$detail_name, input$detail_designer, input$detail_weight,
+      input$detail_needle, input$detail_gauge, input$detail_size, input$detail_pattern_received,
+      input$detail_start_date, input$detail_deadline, input$detail_status, input$detail_ravelry,
+      input$detail_colour, input$detail_notes
+    )
+    bump()
   })
 
   observeEvent(input$log_project, {
@@ -270,14 +422,14 @@ server <- function(input, output, session) {
   })
 
   observe({
-    st <- stages_r() %>% arrange(project_id, stage_order)
-    p <- projects_r()
+    p <- projects_r() %>% filter(status != "finished")
+    st <- stages_r() %>% filter(project_id %in% p$project_id) %>% arrange(project_id, stage_order)
     if (nrow(st) == 0) {
       updateSelectInput(session, "edit_stage", choices = character(0))
     } else {
       labels <- paste0(p$name[match(st$project_id, p$project_id)], " — ", st$stage_order, ". ", st$stage_name, " [", st$status, "]")
       choices <- setNames(st$stage_id, labels)
-      updateSelectInput(session, "edit_stage", choices = choices)
+      updateSelectInput(session, "edit_stage", choices = choices, selected = input$edit_stage)
     }
   })
 
@@ -307,7 +459,8 @@ server <- function(input, output, session) {
 
   # ---- Overview: progress bars ---
   output$progress_bars <- renderUI({
-    prog <- project_progress(projects_r(), stages_r()) %>%
+    not_finished <- projects_r() %>% filter(status != "finished")
+    prog <- project_progress(not_finished, stages_r()) %>%
       mutate(days_left = as.numeric(as.Date(deadline) - Sys.Date()))
 
     bars <- lapply(seq_len(nrow(prog)), function(i) {
@@ -414,9 +567,9 @@ server <- function(input, output, session) {
   observeEvent(input$np_submit, {
     req(input$np_name)
     add_project(
-      input$np_name, input$np_designer, input$np_weight, input$np_needle, input$np_size,
-      input$np_pattern_received, input$np_start_date, input$np_deadline, input$np_notes,
-      input$np_colour
+      input$np_name, input$np_designer, input$np_weight, input$np_needle, input$np_gauge,
+      input$np_size, input$np_pattern_received, input$np_start_date, input$np_deadline,
+      input$np_notes, input$np_colour
     )
     updateTextInput(session, "np_name", value = "")
     updateTextInput(session, "np_designer", value = "")
@@ -437,22 +590,12 @@ server <- function(input, output, session) {
   })
 
   output$stages_table <- renderDT({
+    not_finished <- projects_r() %>% filter(status != "finished") %>% select(project_id, name)
     st <- stages_r() %>%
-      left_join(projects_r() %>% select(project_id, name), by = "project_id") %>%
+      inner_join(not_finished, by = "project_id") %>%
       arrange(name, stage_order) %>%
       select(name, stage_order, stage_name, portability, focus, est_hours, status, total_rows, rows_done)
     datatable(st, options = list(pageLength = 10), rownames = FALSE)
-  })
-
-  output$ravelry_table <- renderDT({
-    p <- projects_r() %>% select(name, ravelry_project) %>% arrange(name)
-    datatable(p, options = list(dom = "t", pageLength = 10), rownames = FALSE)
-  })
-
-  observeEvent(input$rav_submit, {
-    req(input$rav_project)
-    set_ravelry_flag(input$rav_project, TRUE)
-    bump()
   })
 
   # ---- Analytics ---

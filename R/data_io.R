@@ -1,5 +1,6 @@
 library(readr)
 library(dplyr)
+library(lubridate)
 
 # APP_DATA_DIR is set by app.R before sourcing this file.
 if (!exists("APP_DATA_DIR")) {
@@ -8,16 +9,23 @@ if (!exists("APP_DATA_DIR")) {
 
 # ---- column specs --------------------------------------------------------
 
+# Date columns are read as plain text and parsed with parse_flex_date()
+# rather than col_date(), because a spreadsheet program (e.g. Excel) will
+# silently reformat a date cell to the system locale (e.g. "12/09/2026")
+# the moment the file is opened or saved there, regardless of how it was
+# originally written - a strict single-format reader would then read every
+# date as NA.
 projects_spec <- cols(
   project_id       = col_character(),
   name             = col_character(),
   designer         = col_character(),
   yarn_weight      = col_character(),
   needle_size      = col_character(),
+  gauge            = col_character(),
   size             = col_character(),
-  pattern_received = col_date(format = ""),
-  start_date       = col_date(format = ""),
-  deadline         = col_date(format = ""),
+  pattern_received = col_character(),
+  start_date       = col_character(),
+  deadline         = col_character(),
   status           = col_character(),
   ravelry_project  = col_logical(),
   colour           = col_character(),
@@ -39,7 +47,7 @@ stages_spec <- cols(
 
 sessions_spec <- cols(
   session_id = col_character(),
-  date       = col_date(format = ""),
+  date       = col_character(),
   project_id = col_character(),
   stage_id   = col_character(),
   hours      = col_double(),
@@ -48,10 +56,18 @@ sessions_spec <- cols(
   notes      = col_character()
 )
 
+# Accepts ISO (2026-09-12), UK (12/09/2026) and US (09/12/2026 - tried last,
+# since UK usage is assumed by default) date text and returns a Date, or NA
+# if it genuinely can't be parsed.
+parse_flex_date <- function(x) {
+  as.Date(parse_date_time(x, orders = c("ymd", "dmy", "mdy"), quiet = TRUE))
+}
+
 # ---- read / write ---------------------------------------------------------
 
 read_projects <- function() {
-  read_csv(file.path(APP_DATA_DIR, "projects.csv"), col_types = projects_spec)
+  read_csv(file.path(APP_DATA_DIR, "projects.csv"), col_types = projects_spec) %>%
+    mutate(across(c(pattern_received, start_date, deadline), parse_flex_date))
 }
 
 read_stages <- function() {
@@ -59,7 +75,8 @@ read_stages <- function() {
 }
 
 read_sessions <- function() {
-  read_csv(file.path(APP_DATA_DIR, "sessions.csv"), col_types = sessions_spec)
+  read_csv(file.path(APP_DATA_DIR, "sessions.csv"), col_types = sessions_spec) %>%
+    mutate(date = parse_flex_date(date))
 }
 
 # na = "" keeps missing values as blank cells rather than literal "NA" text,
@@ -107,7 +124,7 @@ append_session <- function(date, project_id, stage_id, hours, location, energy, 
   invisible(new_id)
 }
 
-add_project <- function(name, designer, yarn_weight, needle_size, size,
+add_project <- function(name, designer, yarn_weight, needle_size, gauge, size,
                          pattern_received, start_date, deadline, notes,
                          colour = "#C9C2CE") {
   projects <- read_projects()
@@ -118,6 +135,7 @@ add_project <- function(name, designer, yarn_weight, needle_size, size,
     designer = designer,
     yarn_weight = yarn_weight,
     needle_size = needle_size,
+    gauge = gauge,
     size = size,
     pattern_received = as.Date(pattern_received),
     start_date = as.Date(start_date),
@@ -131,9 +149,34 @@ add_project <- function(name, designer, yarn_weight, needle_size, size,
   invisible(new_id)
 }
 
-set_ravelry_flag <- function(project_id, value) {
+# Updates every editable field of an existing project at once (used by the
+# "Project details" tab), overwriting that row in place rather than adding
+# a new one.
+edit_project <- function(project_id, name, designer, yarn_weight, needle_size,
+                          gauge, size, pattern_received, start_date, deadline,
+                          status, ravelry_project, colour, notes) {
   projects <- read_projects()
-  projects$ravelry_project[projects$project_id == project_id] <- value
+  i <- which(projects$project_id == project_id)
+
+  # Any field left blank (e.g. a cleared date input) can arrive as NULL,
+  # which is zero-length and errors when assigned into a single row -
+  # fall back to NA rather than propagating the NULL.
+  or_na <- function(x, na = NA) if (is.null(x) || length(x) == 0) na else x
+
+  projects$name[i] <- or_na(name)
+  projects$designer[i] <- or_na(designer)
+  projects$yarn_weight[i] <- or_na(yarn_weight)
+  projects$needle_size[i] <- or_na(needle_size)
+  projects$gauge[i] <- or_na(gauge)
+  projects$size[i] <- or_na(size)
+  projects$pattern_received[i] <- as.Date(or_na(pattern_received, as.Date(NA)))
+  projects$start_date[i] <- as.Date(or_na(start_date, as.Date(NA)))
+  projects$deadline[i] <- as.Date(or_na(deadline, as.Date(NA)))
+  projects$status[i] <- or_na(status)
+  projects$ravelry_project[i] <- or_na(ravelry_project, FALSE)
+  projects$colour[i] <- or_na(colour)
+  projects$notes[i] <- or_na(notes)
+
   write_projects(projects)
 }
 
