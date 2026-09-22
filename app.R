@@ -10,11 +10,52 @@ source("R/data_io.R")
 source("R/calculations.R")
 
 YARN_WEIGHTS <- c("lace", "fingering", "sport", "dk", "worsted", "aran", "bulky")
+
+# A stage's category (as opposed to its free-text name) is what Analytics
+# groups by, so "Swatch" for one project and "Swatch: measure & calculate
+# pattern numbers..." for another still combine into one comparable row.
+# New categories can always be typed in as new constructions come up.
+STAGE_CATEGORIES <- c(
+  "Swatch", "Back", "Front", "Right Front", "Left Front", "Body", "Sleeves",
+  "Cuffs", "Shoulders", "Yoke", "Colourwork Yoke", "Neckband", "Back Neck",
+  "Collar", "Hem", "Button band", "Embroidery", "Finishing", "Other"
+)
 LOCATIONS <- names(location_min_portability)
 ENERGIES <- names(energy_max_focus)
 
 PORTABILITY_LABEL <- "Portability (1 = needs full kit, 3 = grab-and-go)"
 FOCUS_LABEL <- "Focus required (1 = mindless, 3 = full concentration)"
+
+# Shared deadline-urgency colour scale, used for both the overall project
+# badges and each stage's mini-deadline outline: overdue is darkest, then
+# progressively lighter as there's more time to spare. safe_colour is what
+# shows once nothing is urgent - a visible "all clear" green for a badge
+# that's always shown, or a plain border colour for a stage segment outline
+# that should otherwise blend in.
+urgency_colour <- function(days_left, safe_colour = "#8FAE8B") {
+  if (is.na(days_left)) {
+    return(safe_colour)
+  }
+  if (days_left < 0) {
+    "#7A1F1F"
+  } else if (days_left <= 3) {
+    "#C25C5C"
+  } else if (days_left <= 7) {
+    "#E8B54A"
+  } else {
+    safe_colour
+  }
+}
+
+# A project's own hex colour, softened to a translucent tint so it can sit
+# behind readable dark text regardless of how light or dark that colour is.
+hex_to_rgba <- function(hex, alpha = 0.35) {
+  hex <- gsub("#", "", hex)
+  r <- strtoi(substr(hex, 1, 2), 16)
+  g <- strtoi(substr(hex, 3, 4), 16)
+  b <- strtoi(substr(hex, 5, 6), 16)
+  sprintf("rgba(%d,%d,%d,%.2f)", r, g, b, alpha)
+}
 
 # A small, low-opacity 5-petal floral sprig used as a subtle decorative accent.
 FLORAL_SVG <- paste0(
@@ -75,6 +116,11 @@ ui <- page_navbar(
     card(
       card_header("Progress & deadlines"),
       uiOutput("progress_bars")
+    ),
+    card(
+      card_header("Upcoming stage mini-deadlines"),
+      p(style = "font-size:12px; color:#8A6E78;", "Any not-yet-done stage due within the next 30 days (or overdue), across all active projects, soonest first. Project name coloured by its yarn colour; days left coloured by urgency."),
+      DTOutput("upcoming_stage_deadlines")
     )
   ),
 
@@ -131,8 +177,8 @@ ui <- page_navbar(
       textInput("np_gauge", "Gauge (e.g. '22 sts x 30 rows = 4in')"),
       textInput("np_size", "Size you're making"),
       textInput("np_colour", "Yarn colour, as a hex code (used for its progress bar)", value = "#C9789A", placeholder = "e.g. #2F4F3A for bottle green"),
-      dateInput("np_pattern_received", "Pattern received date", value = Sys.Date()),
-      dateInput("np_start_date", "Start date (leave as today if not cast on yet)", value = Sys.Date()),
+      dateInput("np_pattern_received", "Pattern received date", value = NULL),
+      dateInput("np_start_date", "Start date (leave as today if not cast on yet)", value = NULL),
       dateInput("np_deadline", "Deadline"),
       textAreaInput("np_notes", "Notes"),
       actionButton("np_submit", "Add project", class = "btn-primary")
@@ -180,17 +226,29 @@ ui <- page_navbar(
       col_widths = c(6, 6),
       card(
         card_header("Log time"),
-        dateInput("log_date", "Date", value = Sys.Date()),
-        selectInput("log_project", "Project", choices = NULL),
+        layout_columns(
+          col_widths = c(6, 6),
+          dateInput("log_date", "Date", value = NULL),
+          selectInput("log_project", "Project", choices = NULL)
+        ),
         selectInput("log_stage", "Stage", choices = NULL),
         uiOutput("log_row_progress_ui"),
-        numericInput("log_rows_done", "Chart/row-tracked stage: now at row # (leave blank if not applicable)", value = NA, min = 0, step = 1),
-        numericInput("log_hours", "Hours", value = 1, min = 0, step = 0.25),
-        selectInput("log_location", "Where", choices = LOCATIONS),
-        selectInput("log_energy", "Energy", choices = ENERGIES),
+        layout_columns(
+          col_widths = c(6, 6),
+          numericInput("log_rows_done", "Chart/row-tracked stage: now at row # (optional)", value = NA, min = 0, step = 1),
+          numericInput("log_hours", "Hours", value = 1, min = 0, step = 0.25)
+        ),
+        layout_columns(
+          col_widths = c(6, 6),
+          selectInput("log_location", "Where", choices = LOCATIONS),
+          selectInput("log_energy", "Energy", choices = ENERGIES)
+        ),
         textAreaInput("log_notes", "Notes (optional)", placeholder = "e.g. frogged the raglan increases twice, gauge issue"),
-        selectInput("log_stage_status", "Update this stage's status to:", choices = c("(leave unchanged)", "in_progress", "done")),
-        actionButton("log_submit", "Log session", class = "btn-primary")
+        layout_columns(
+          col_widths = c(6, 6),
+          selectInput("log_stage_status", "Update this stage's status to:", choices = c("(leave unchanged)", "in_progress", "done")),
+          div(class = "align-with-input", actionButton("log_submit", "Log session", class = "btn-primary"))
+        )
       ),
       card(
         card_header("Recent sessions"),
@@ -208,6 +266,7 @@ ui <- page_navbar(
         selectInput("ns_project", "Project", choices = NULL),
         textInput("ns_name", "Stage name")
       ),
+      selectizeInput("ns_category", "Stage category (for Analytics grouping)", choices = STAGE_CATEGORIES, options = list(create = TRUE, placeholder = "pick or type a new category")),
       layout_columns(
         col_widths = c(6, 6),
         sliderInput("ns_portability", PORTABILITY_LABEL, min = 1, max = 3, value = 2),
@@ -218,8 +277,9 @@ ui <- page_navbar(
         numericInput("ns_order", "Order", value = 1, min = 1, step = 1),
         numericInput("ns_est_hours", "Estimated hours (optional)", value = NA, min = 0, step = 0.5),
         numericInput("ns_total_rows", "Total rows in chart (optional)", value = NA, min = 1, step = 1),
-        div(class = "align-with-input", actionButton("ns_submit", "Add stage", class = "btn-primary"))
-      )
+        dateInput("ns_stage_deadline", "Mini-deadline (optional)", value = NA)
+      ),
+      div(class = "align-with-input", actionButton("ns_submit", "Add stage", class = "btn-primary"))
     ),
     card(
       height = "480px",
@@ -227,7 +287,7 @@ ui <- page_navbar(
       DTOutput("stages_table")
     ),
     card(
-      height = "440px",
+      height = "560px",
       card_header("Edit a stage"),
       p("Pick a stage to load its current values, adjust anything, then save."),
       selectInput("edit_stage", "Stage", choices = NULL),
@@ -236,6 +296,7 @@ ui <- page_navbar(
         textInput("edit_name", "Stage name"),
         selectInput("edit_status", "Status", choices = c("not_started", "in_progress", "done"))
       ),
+      selectizeInput("edit_category", "Stage category (for Analytics grouping)", choices = STAGE_CATEGORIES, options = list(create = TRUE)),
       layout_columns(
         col_widths = c(6, 6),
         sliderInput("edit_portability", PORTABILITY_LABEL, min = 1, max = 3, value = 2),
@@ -245,8 +306,9 @@ ui <- page_navbar(
         col_widths = c(4, 4, 4),
         numericInput("edit_est_hours", "Estimated hours", value = NA, min = 0, step = 0.5),
         numericInput("edit_total_rows", "Total rows in chart", value = NA, min = 1, step = 1),
-        div(class = "align-with-input", actionButton("edit_submit", "Save changes", class = "btn-primary"))
-      )
+        dateInput("edit_stage_deadline", "Mini-deadline (optional)", value = NA)
+      ),
+      div(class = "align-with-input", actionButton("edit_submit", "Save changes", class = "btn-primary"))
     )
   ),
 
@@ -259,7 +321,7 @@ ui <- page_navbar(
         plotlyOutput("hours_per_project_plot", height = "350px")
       ),
       card(
-        card_header("Hours per logged session, by stage and yarn weight (from your history)"),
+        card_header("Hours per logged session, by stage category and yarn weight (from your history)"),
         DTOutput("hours_per_stage_table")
       )
     )
@@ -269,6 +331,13 @@ ui <- page_navbar(
 # ---- server -------------------------------------------------------------
 
 server <- function(input, output, session) {
+
+  # Runs once per new browser session (unlike a UI-level dateInput default,
+  # which is baked in once when the app process starts and would otherwise
+  # go stale after midnight for a long-running app).
+  updateDateInput(session, "log_date", value = Sys.Date())
+  updateDateInput(session, "np_pattern_received", value = Sys.Date())
+  updateDateInput(session, "np_start_date", value = Sys.Date())
 
   refresh <- reactiveVal(0)
   bump <- function() refresh(refresh() + 1)
@@ -305,7 +374,13 @@ server <- function(input, output, session) {
 
     updateTextInput(session, "detail_name", value = proj$name)
     updateTextInput(session, "detail_designer", value = proj$designer)
-    updateSelectizeInput(session, "detail_weight", selected = proj$yarn_weight)
+    # a custom yarn weight typed in previously (via options = list(create =
+    # TRUE)) isn't part of the fixed YARN_WEIGHTS choice list, so it has to
+    # be added back in before it can be selected - otherwise it silently
+    # fails to display, looking like the value was lost even though it's
+    # still saved correctly in the data.
+    weight_choices <- if (is.na(proj$yarn_weight)) YARN_WEIGHTS else union(YARN_WEIGHTS, proj$yarn_weight)
+    updateSelectizeInput(session, "detail_weight", choices = weight_choices, selected = proj$yarn_weight)
     updateTextInput(session, "detail_needle", value = proj$needle_size)
     updateTextInput(session, "detail_gauge", value = proj$gauge)
     updateTextInput(session, "detail_size", value = proj$size)
@@ -360,10 +435,16 @@ server <- function(input, output, session) {
         TRUE ~ 0
       )
       pct <- round(frac * 100)
+      # a stage mini-deadline only matters while the stage isn't done yet
+      border_colour <- "#F1DDE2"
+      if (row$status != "done" && !is.na(row$stage_deadline)) {
+        days_left <- as.numeric(row$stage_deadline - Sys.Date())
+        border_colour <- urgency_colour(days_left, safe_colour = "#F1DDE2")
+      }
       div(
         style = paste0(
           "position:relative; flex:1; height:22px; margin:0 2px; border-radius:6px; overflow:hidden;",
-          "background:#F1DDE2; border:1px solid #F1DDE2;"
+          "background:#F1DDE2; border:2px solid ", border_colour, ";"
         ),
         div(style = paste0("background:", bar_colour, "; width:", pct, "%; height:100%;")),
         div(
@@ -373,8 +454,9 @@ server <- function(input, output, session) {
       )
     })
 
+    deadline_suffix <- ifelse(is.na(st$stage_deadline), "", paste0(" (due ", format(st$stage_deadline, "%d %b"), ")"))
     legend <- paste0(
-      st$stage_order, ". ", st$stage_name, " [", st$status, "]",
+      st$stage_order, ". ", st$stage_name, " [", st$status, "]", deadline_suffix,
       collapse = "  •  "
     )
 
@@ -441,18 +523,31 @@ server <- function(input, output, session) {
       return(NULL)
     }
     updateTextInput(session, "edit_name", value = st$stage_name[1])
+    # a custom category typed in previously isn't part of the fixed
+    # STAGE_CATEGORIES list, so (same issue as the yarn weight field) it
+    # has to be added back into the choices before it can be selected.
+    category_choices <- if (is.na(st$stage_category[1])) STAGE_CATEGORIES else union(STAGE_CATEGORIES, st$stage_category[1])
+    updateSelectizeInput(session, "edit_category", choices = category_choices, selected = st$stage_category[1])
     updateSelectInput(session, "edit_status", selected = st$status[1])
     updateSliderInput(session, "edit_portability", value = st$portability[1])
     updateSliderInput(session, "edit_focus", value = st$focus[1])
     updateNumericInput(session, "edit_est_hours", value = st$est_hours[1])
     updateNumericInput(session, "edit_total_rows", value = st$total_rows[1])
+    # updateDateInput(value = NULL) is silently dropped rather than clearing
+    # the field (see the same issue on the Project details tab), so a
+    # missing deadline is set via the lower-level input message instead.
+    if (is.na(st$stage_deadline[1])) {
+      session$sendInputMessage("edit_stage_deadline", list(value = ""))
+    } else {
+      updateDateInput(session, "edit_stage_deadline", value = st$stage_deadline[1])
+    }
   })
 
   observeEvent(input$edit_submit, {
     req(input$edit_stage)
     edit_stage(
-      input$edit_stage, input$edit_name, input$edit_portability, input$edit_focus,
-      input$edit_est_hours, input$edit_total_rows, input$edit_status
+      input$edit_stage, input$edit_name, input$edit_category, input$edit_portability, input$edit_focus,
+      input$edit_est_hours, input$edit_total_rows, input$edit_status, input$edit_stage_deadline
     )
     bump()
   })
@@ -467,20 +562,14 @@ server <- function(input, output, session) {
       row <- prog[i, ]
       pct <- round(row$pct_complete * 100)
       bar_colour <- if (!is.na(row$colour) && nzchar(row$colour)) row$colour else "#C9789A"
-      urgency_colour <- if (row$days_left < 7) {
-        "#C25C5C"
-      } else if (row$days_left < 21) {
-        "#E8B54A"
-      } else {
-        "#8FAE8B"
-      }
+      badge_colour <- urgency_colour(row$days_left)
       tagList(
         div(
           style = "margin-bottom: 6px;",
           strong(row$name),
           span(
             style = paste0(
-              "float:right; background:", urgency_colour, "; color:white;",
+              "float:right; background:", badge_colour, "; color:white;",
               "border-radius:999px; padding:2px 10px; font-size:12px;"
             ),
             paste0(row$days_left, " days left (", format(row$deadline, "%d %b %Y"), ")")
@@ -499,6 +588,39 @@ server <- function(input, output, session) {
       )
     })
     tagList(bars)
+  })
+
+  output$upcoming_stage_deadlines <- renderDT({
+    # includes pending projects too - a designer's stage schedule is real
+    # even before the pattern's arrived or you've cast on, only a genuinely
+    # finished project's deadlines stop mattering
+    not_finished <- projects_r() %>% filter(status != "finished") %>% select(project_id, name, colour)
+    upcoming <- stages_r() %>%
+      filter(status != "done", !is.na(stage_deadline)) %>%
+      inner_join(not_finished, by = "project_id") %>%
+      mutate(days_left = as.numeric(stage_deadline - Sys.Date())) %>%
+      filter(days_left <= 30) %>%
+      arrange(stage_deadline) %>%
+      select(name, stage_name, status, stage_deadline, days_left, colour)
+
+    display <- upcoming %>% select(-colour)
+    dt <- datatable(display, options = list(dom = "t", pageLength = 15), rownames = FALSE)
+
+    if (nrow(upcoming) == 0) {
+      return(dt)
+    }
+
+    project_colours <- upcoming %>% distinct(name, colour)
+    dt %>%
+      formatStyle(
+        "name",
+        backgroundColor = styleEqual(project_colours$name, sapply(project_colours$colour, hex_to_rgba))
+      ) %>%
+      formatStyle(
+        "days_left",
+        backgroundColor = styleInterval(c(0, 4, 8), c("#7A1F1F", "#C25C5C", "#E8B54A", "#8FAE8B")),
+        color = "white"
+      )
   })
 
   # ---- Gantt ---
@@ -582,10 +704,11 @@ server <- function(input, output, session) {
   observeEvent(input$ns_submit, {
     req(input$ns_project, input$ns_name)
     add_stage(
-      input$ns_project, input$ns_name, input$ns_order, input$ns_portability,
-      input$ns_focus, input$ns_est_hours, input$ns_total_rows
+      input$ns_project, input$ns_name, input$ns_category, input$ns_order, input$ns_portability,
+      input$ns_focus, input$ns_est_hours, input$ns_total_rows, input$ns_stage_deadline
     )
     updateTextInput(session, "ns_name", value = "")
+    updateDateInput(session, "ns_stage_deadline", value = NA)
     bump()
   })
 
@@ -594,15 +717,15 @@ server <- function(input, output, session) {
     st <- stages_r() %>%
       inner_join(not_finished, by = "project_id") %>%
       arrange(name, stage_order) %>%
-      select(name, stage_order, stage_name, portability, focus, est_hours, status, total_rows, rows_done)
+      select(name, stage_order, stage_name, stage_category, portability, focus, est_hours, status, stage_deadline, total_rows, rows_done)
     datatable(st, options = list(pageLength = 10), rownames = FALSE)
   })
 
   # ---- Analytics ---
   output$hours_per_project_plot <- renderPlotly({
     hp <- total_hours_per_project(sessions_r(), projects_r())
-    plot_ly(hp, x = ~name, y = ~total_hours, type = "bar") %>%
-      layout(xaxis = list(title = ""), yaxis = list(title = "Total hours"))
+    plot_ly(hp, x = ~name, y = ~total_hours, type = "bar", marker = list(color = ~colour)) %>%
+      layout(xaxis = list(title = ""), yaxis = list(title = "Total hours"), showlegend = FALSE)
   })
 
   output$hours_per_stage_table <- renderDT({

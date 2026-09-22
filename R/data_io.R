@@ -33,16 +33,18 @@ projects_spec <- cols(
 )
 
 stages_spec <- cols(
-  stage_id    = col_character(),
-  project_id  = col_character(),
-  stage_name  = col_character(),
-  stage_order = col_integer(),
-  portability = col_integer(),
-  focus       = col_integer(),
-  est_hours   = col_double(),
-  status      = col_character(),
-  total_rows  = col_integer(),
-  rows_done   = col_integer()
+  stage_id       = col_character(),
+  project_id     = col_character(),
+  stage_name     = col_character(),
+  stage_category = col_character(),
+  stage_order    = col_integer(),
+  portability    = col_integer(),
+  focus          = col_integer(),
+  est_hours      = col_double(),
+  status         = col_character(),
+  stage_deadline = col_character(),
+  total_rows     = col_integer(),
+  rows_done      = col_integer()
 )
 
 sessions_spec <- cols(
@@ -71,7 +73,8 @@ read_projects <- function() {
 }
 
 read_stages <- function() {
-  read_csv(file.path(APP_DATA_DIR, "stages.csv"), col_types = stages_spec)
+  read_csv(file.path(APP_DATA_DIR, "stages.csv"), col_types = stages_spec) %>%
+    mutate(stage_deadline = parse_flex_date(stage_deadline))
 }
 
 read_sessions <- function() {
@@ -180,8 +183,8 @@ edit_project <- function(project_id, name, designer, yarn_weight, needle_size,
   write_projects(projects)
 }
 
-add_stage <- function(project_id, stage_name, stage_order, portability, focus,
-                       est_hours, total_rows = NA) {
+add_stage <- function(project_id, stage_name, stage_category, stage_order, portability, focus,
+                       est_hours, total_rows = NA, stage_deadline = NA) {
   stages <- read_stages()
   # stage_id is a sequential id per project, independent of stage_order, so
   # two stages accidentally given the same order never collide into the
@@ -193,11 +196,13 @@ add_stage <- function(project_id, stage_name, stage_order, portability, focus,
     stage_id = new_id,
     project_id = project_id,
     stage_name = stage_name,
+    stage_category = stage_category,
     stage_order = as.integer(stage_order),
     portability = as.integer(portability),
     focus = as.integer(focus),
     est_hours = as.numeric(est_hours),
     status = "not_started",
+    stage_deadline = if (is.null(stage_deadline) || length(stage_deadline) == 0) as.Date(NA) else as.Date(stage_deadline),
     total_rows = as.integer(total_rows),
     rows_done = if (is.na(total_rows)) NA_integer_ else 0L
   )
@@ -220,17 +225,27 @@ update_stage_rows <- function(stage_id, rows_done) {
 # Updates every editable field of an existing stage at once (used by the
 # "Edit a stage" panel). Keeps rows_done consistent if total_rows is added
 # or removed.
-edit_stage <- function(stage_id, stage_name, portability, focus, est_hours,
-                        total_rows, status) {
+edit_stage <- function(stage_id, stage_name, stage_category, portability, focus, est_hours,
+                        total_rows, status, stage_deadline = NA) {
   stages <- read_stages()
   i <- which(stages$stage_id == stage_id)
 
+  # a cleared date input arrives as NULL, which is zero-length and errors
+  # when assigned into a single row - fall back to NA instead.
+  stage_deadline_value <- if (is.null(stage_deadline) || length(stage_deadline) == 0) {
+    as.Date(NA)
+  } else {
+    as.Date(stage_deadline)
+  }
+
   stages$stage_name[i] <- stage_name
+  stages$stage_category[i] <- stage_category
   stages$portability[i] <- as.integer(portability)
   stages$focus[i] <- as.integer(focus)
   stages$est_hours[i] <- as.numeric(est_hours)
   stages$total_rows[i] <- as.integer(total_rows)
   stages$status[i] <- status
+  stages$stage_deadline[i] <- stage_deadline_value
 
   if (is.na(stages$total_rows[i])) {
     stages$rows_done[i] <- NA_integer_

@@ -40,19 +40,19 @@ project_progress <- function(projects, stages) {
 # projects of a given yarn weight are realistic to take on at once).
 hours_per_stage_by_weight <- function(sessions, stages, projects) {
   sessions %>%
-    left_join(stages %>% select(stage_id, stage_name), by = "stage_id") %>%
+    left_join(stages %>% select(stage_id, stage_category), by = "stage_id") %>%
     left_join(projects %>% select(project_id, yarn_weight, size), by = "project_id") %>%
-    group_by(yarn_weight, stage_name) %>%
+    group_by(yarn_weight, stage_category) %>%
     summarise(total_hours = sum(hours), n_sessions = n(), .groups = "drop") %>%
     mutate(avg_hours_per_session = round(total_hours / n_sessions, 2)) %>%
-    arrange(yarn_weight, stage_name)
+    arrange(yarn_weight, stage_category)
 }
 
 total_hours_per_project <- function(sessions, projects) {
   sessions %>%
     group_by(project_id) %>%
     summarise(total_hours = sum(hours), n_sessions = n(), .groups = "drop") %>%
-    right_join(projects %>% select(project_id, name, yarn_weight, size), by = "project_id") %>%
+    right_join(projects %>% select(project_id, name, yarn_weight, size, colour), by = "project_id") %>%
     mutate(total_hours = coalesce(total_hours, 0)) %>%
     arrange(desc(total_hours))
 }
