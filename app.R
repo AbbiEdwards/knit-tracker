@@ -11,10 +11,8 @@ source("R/calculations.R")
 
 YARN_WEIGHTS <- c("lace", "fingering", "sport", "dk", "worsted", "aran", "bulky")
 
-# A stage's category (as opposed to its free-text name) is what Analytics
-# groups by, so "Swatch" for one project and "Swatch: measure & calculate
-# pattern numbers..." for another still combine into one comparable row.
-# New categories can always be typed in as new constructions come up.
+# Suggested stage categories for Analytics grouping. Free text is also
+# accepted (selectizeInput create = TRUE).
 STAGE_CATEGORIES <- c(
   "Swatch", "Back", "Front", "Right Front", "Left Front", "Body", "Sleeves",
   "Cuffs", "Shoulders", "Yoke", "Colourwork Yoke", "Neckband", "Back Neck",
@@ -26,29 +24,27 @@ ENERGIES <- names(energy_max_focus)
 PORTABILITY_LABEL <- "Portability (1 = needs full kit, 3 = grab-and-go)"
 FOCUS_LABEL <- "Focus required (1 = mindless, 3 = full concentration)"
 
-# Shared deadline-urgency colour scale, used for both the overall project
-# badges and each stage's mini-deadline outline: overdue is darkest, then
-# progressively lighter as there's more time to spare. safe_colour is what
-# shows once nothing is urgent - a visible "all clear" green for a badge
-# that's always shown, or a plain border colour for a stage segment outline
-# that should otherwise blend in.
-urgency_colour <- function(days_left, safe_colour = "#8FAE8B") {
+# Overdue, then darkest to lightest as days_left increases, then safe.
+URGENCY_COLOURS <- c(overdue = "#7A1F1F", red = "#C25C5C", amber = "#E8B54A", safe = "#8FAE8B")
+
+# Maps days_left to the urgency colour scale. safe_colour is returned once
+# nothing is urgent (8+ days, or NA).
+urgency_colour <- function(days_left, safe_colour = URGENCY_COLOURS[["safe"]]) {
   if (is.na(days_left)) {
     return(safe_colour)
   }
   if (days_left < 0) {
-    "#7A1F1F"
+    URGENCY_COLOURS[["overdue"]]
   } else if (days_left <= 3) {
-    "#C25C5C"
+    URGENCY_COLOURS[["red"]]
   } else if (days_left <= 7) {
-    "#E8B54A"
+    URGENCY_COLOURS[["amber"]]
   } else {
     safe_colour
   }
 }
 
-# A project's own hex colour, softened to a translucent tint so it can sit
-# behind readable dark text regardless of how light or dark that colour is.
+# Converts a hex colour to a translucent rgba() string.
 hex_to_rgba <- function(hex, alpha = 0.35) {
   hex <- gsub("#", "", hex)
   r <- strtoi(substr(hex, 1, 2), 16)
@@ -57,7 +53,36 @@ hex_to_rgba <- function(hex, alpha = 0.35) {
   sprintf("rgba(%d,%d,%d,%.2f)", r, g, b, alpha)
 }
 
-# A small, low-opacity 5-petal floral sprig used as a subtle decorative accent.
+# Keeps projects whose deadline hasn't passed yet (or has none set).
+not_past_deadline <- function(projects) {
+  projects %>% filter(is.na(deadline) | as.Date(deadline) >= Sys.Date())
+}
+
+# Adds a stage/project's currently-saved value to a fixed choice list, so a
+# previously typed custom value (via selectize create = TRUE) still shows
+# up as selected instead of appearing blank.
+choices_with_current <- function(base_choices, current_value) {
+  if (is.na(current_value)) base_choices else union(base_choices, current_value)
+}
+
+# Sets a dateInput's value, clearing it properly when date_value is NA.
+# updateDateInput(value = NULL) is silently ignored rather than clearing
+# the field, so a blank date is sent via the lower-level input message.
+set_date_input <- function(session, input_id, date_value) {
+  if (is.na(date_value)) {
+    session$sendInputMessage(input_id, list(value = ""))
+  } else {
+    updateDateInput(session, input_id, value = date_value)
+  }
+}
+
+# Notification suffix reporting a stage's est_hours after it's marked done.
+done_hours_note <- function(stage_id) {
+  hours <- read_stages() %>% filter(stage_id == !!stage_id) %>% pull(est_hours)
+  paste0(" — marked done, est. hours updated to ", hours, "h")
+}
+
+# A small, low-opacity 5-petal floral sprig used as a decorative accent.
 FLORAL_SVG <- paste0(
   "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='120' ",
   "height='120' viewBox='0 0 120 120'%3E%3Cg fill='%23D98BA0' fill-opacity=",
@@ -72,9 +97,9 @@ app_theme <- bs_theme(
   fg = "#4A3540",
   primary = "#C9789A",
   secondary = "#EBC9CE",
-  success = "#8FAE8B",
-  warning = "#E8B54A",
-  danger = "#C25C5C",
+  success = URGENCY_COLOURS[["safe"]],
+  warning = URGENCY_COLOURS[["amber"]],
+  danger = URGENCY_COLOURS[["red"]],
   base_font = "'Segoe UI', 'Helvetica Neue', Arial, sans-serif",
   "card-border-radius" = "0.9rem",
   "border-radius" = "0.6rem"
@@ -90,9 +115,8 @@ app_css <- tags$style(HTML(sprintf("
   }
   .card { box-shadow: 0 2px 10px rgba(74, 53, 64, 0.06); border: 1px solid #F1DDE2; }
   .card-header { background-color: #FBEFF1; font-weight: 600; border-bottom: 1px solid #F1DDE2; }
-  /* bslib clips card content to its rounded corners by default, which cuts
-     off a select dropdown's flyout menu - only cards holding a dropdown
-     that needs to open past the card's edge opt out of that clipping. */
+  /* Opts specific dropdown-holding cards out of bslib's default corner
+     clipping, which otherwise cuts off the flyout menu. */
   .dropdown-card { overflow: visible !important; }
   body {
     background-image: url('%s');
@@ -222,38 +246,32 @@ ui <- page_navbar(
 
   nav_panel(
     "Log a session",
-    layout_columns(
-      col_widths = c(6, 6),
-      card(
-        card_header("Log time"),
-        layout_columns(
-          col_widths = c(6, 6),
-          dateInput("log_date", "Date", value = NULL),
-          selectInput("log_project", "Project", choices = NULL)
-        ),
-        selectInput("log_stage", "Stage", choices = NULL),
-        uiOutput("log_row_progress_ui"),
-        layout_columns(
-          col_widths = c(6, 6),
-          numericInput("log_rows_done", "Chart/row-tracked stage: now at row # (optional)", value = NA, min = 0, step = 1),
-          numericInput("log_hours", "Hours", value = 1, min = 0, step = 0.25)
-        ),
-        layout_columns(
-          col_widths = c(6, 6),
-          selectInput("log_location", "Where", choices = LOCATIONS),
-          selectInput("log_energy", "Energy", choices = ENERGIES)
-        ),
-        textAreaInput("log_notes", "Notes (optional)", placeholder = "e.g. frogged the raglan increases twice, gauge issue"),
-        layout_columns(
-          col_widths = c(6, 6),
-          selectInput("log_stage_status", "Update this stage's status to:", choices = c("(leave unchanged)", "in_progress", "done")),
-          div(class = "align-with-input", actionButton("log_submit", "Log session", class = "btn-primary"))
-        )
+    card(
+      card_header("Log time"),
+      layout_columns(
+        col_widths = c(4, 4, 4),
+        dateInput("log_date", "Date", value = NULL),
+        selectInput("log_project", "Project", choices = NULL),
+        selectInput("log_stage", "Stage", choices = NULL)
       ),
-      card(
-        card_header("Recent sessions"),
-        DTOutput("recent_sessions")
+      uiOutput("log_row_progress_ui"),
+      layout_columns(
+        col_widths = c(4, 4, 4),
+        numericInput("log_rows_done", "Chart/row-tracked stage: now at row # (optional)", value = NA, min = 0, step = 1),
+        numericInput("log_hours", "Hours", value = 1, min = 0, step = 0.25),
+        selectInput("log_location", "Where", choices = LOCATIONS)
+      ),
+      textAreaInput("log_notes", "Notes (optional)", placeholder = "e.g. frogged the raglan increases twice, gauge issue"),
+      layout_columns(
+        col_widths = c(4, 4, 4),
+        selectInput("log_energy", "Energy", choices = ENERGIES),
+        selectInput("log_stage_status", "Update this stage's status to:", choices = c("(leave unchanged)", "in_progress", "done")),
+        div(class = "align-with-input", actionButton("log_submit", "Log session", class = "btn-primary"))
       )
+    ),
+    card(
+      card_header("Recent sessions"),
+      DTOutput("recent_sessions")
     )
   ),
 
@@ -332,9 +350,10 @@ ui <- page_navbar(
 
 server <- function(input, output, session) {
 
-  # Runs once per new browser session (unlike a UI-level dateInput default,
-  # which is baked in once when the app process starts and would otherwise
-  # go stale after midnight for a long-running app).
+  # ---- shared setup ----
+
+  # Refreshes today's date per session (a UI-level default is set once at
+  # app start and goes stale over a long-running session).
   updateDateInput(session, "log_date", value = Sys.Date())
   updateDateInput(session, "np_pattern_received", value = Sys.Date())
   updateDateInput(session, "np_start_date", value = Sys.Date())
@@ -346,16 +365,12 @@ server <- function(input, output, session) {
   stages_r   <- reactive({ refresh(); read_stages() })
   sessions_r <- reactive({ refresh(); read_sessions() })
 
-  # Keep project dropdowns in sync with the underlying data. Rebuilding
-  # choices without re-selecting the current value would otherwise silently
-  # reset each dropdown to its first option on every refresh (e.g. right
-  # after saving an edit).
+  # Keeps project dropdowns in sync with the data, preserving the current
+  # selection (a refresh would otherwise reset each to its first option).
   observe({
     p <- projects_r()
     choices <- setNames(p$project_id, p$name)
-    # finished projects are done with, so they're left out of "add a stage"
-    # - but still findable via Project details, Analytics, and Log a session
-    not_finished <- p %>% filter(status != "finished")
+    not_finished <- not_past_deadline(p)
     not_finished_choices <- setNames(not_finished$project_id, not_finished$name)
 
     updateSelectInput(session, "log_project", choices = choices, selected = input$log_project)
@@ -363,7 +378,79 @@ server <- function(input, output, session) {
     updateSelectInput(session, "detail_project", choices = choices, selected = input$detail_project)
   })
 
-  # load the selected project's current values into the edit form
+  # ---- Overview ----
+
+  output$progress_bars <- renderUI({
+    not_finished <- not_past_deadline(projects_r())
+    prog <- project_progress(not_finished, stages_r()) %>%
+      mutate(days_left = as.numeric(as.Date(deadline) - Sys.Date()))
+
+    bars <- lapply(seq_len(nrow(prog)), function(i) {
+      row <- prog[i, ]
+      pct <- round(row$pct_complete * 100)
+      bar_colour <- if (!is.na(row$colour) && nzchar(row$colour)) row$colour else "#C9789A"
+      badge_colour <- urgency_colour(row$days_left)
+      tagList(
+        div(
+          style = "margin-bottom: 6px;",
+          strong(row$name),
+          span(
+            style = paste0(
+              "float:right; background:", badge_colour, "; color:white;",
+              "border-radius:999px; padding:2px 10px; font-size:12px;"
+            ),
+            paste0(row$days_left, " days left (", format(row$deadline, "%d %b %Y"), ")")
+          )
+        ),
+        div(
+          style = "background:#F1DDE2; border-radius:999px; height:22px; margin-bottom:18px; overflow:hidden;",
+          div(
+            style = paste0(
+              "background:", bar_colour, "; width:", pct, "%; height:100%; color:white;",
+              "text-align:right; padding-right:8px; font-size:12px; line-height:22px; border-radius:999px;"
+            ),
+            paste0(pct, "%")
+          )
+        )
+      )
+    })
+    tagList(bars)
+  })
+
+  # Includes pending projects; excludes only those past their deadline.
+  output$upcoming_stage_deadlines <- renderDT({
+    not_finished <- not_past_deadline(projects_r()) %>% select(project_id, name, colour)
+    upcoming <- stages_r() %>%
+      filter(status != "done", !is.na(stage_deadline)) %>%
+      inner_join(not_finished, by = "project_id") %>%
+      mutate(days_left = as.numeric(stage_deadline - Sys.Date())) %>%
+      filter(days_left <= 30) %>%
+      arrange(stage_deadline) %>%
+      select(name, stage_name, status, stage_deadline, days_left, colour)
+
+    display <- upcoming %>% select(-colour)
+    dt <- datatable(display, options = list(dom = "t", pageLength = 15), rownames = FALSE)
+
+    if (nrow(upcoming) == 0) {
+      return(dt)
+    }
+
+    project_colours <- upcoming %>% distinct(name, colour)
+    dt %>%
+      formatStyle(
+        "name",
+        backgroundColor = styleEqual(project_colours$name, sapply(project_colours$colour, hex_to_rgba))
+      ) %>%
+      formatStyle(
+        "days_left",
+        backgroundColor = styleInterval(c(0, 4, 8), unname(URGENCY_COLOURS)),
+        color = "white"
+      )
+  })
+
+  # ---- Project details ----
+
+  # Loads the selected project's current values into the edit form.
   observeEvent(input$detail_project, {
     req(input$detail_project)
     proj <- projects_r() %>% filter(project_id == input$detail_project)
@@ -374,32 +461,17 @@ server <- function(input, output, session) {
 
     updateTextInput(session, "detail_name", value = proj$name)
     updateTextInput(session, "detail_designer", value = proj$designer)
-    # a custom yarn weight typed in previously (via options = list(create =
-    # TRUE)) isn't part of the fixed YARN_WEIGHTS choice list, so it has to
-    # be added back in before it can be selected - otherwise it silently
-    # fails to display, looking like the value was lost even though it's
-    # still saved correctly in the data.
-    weight_choices <- if (is.na(proj$yarn_weight)) YARN_WEIGHTS else union(YARN_WEIGHTS, proj$yarn_weight)
-    updateSelectizeInput(session, "detail_weight", choices = weight_choices, selected = proj$yarn_weight)
+    updateSelectizeInput(
+      session, "detail_weight",
+      choices = choices_with_current(YARN_WEIGHTS, proj$yarn_weight), selected = proj$yarn_weight
+    )
     updateTextInput(session, "detail_needle", value = proj$needle_size)
     updateTextInput(session, "detail_gauge", value = proj$gauge)
     updateTextInput(session, "detail_size", value = proj$size)
     updateTextInput(session, "detail_colour", value = proj$colour)
-    # updateDateInput(value = NULL) is silently dropped rather than clearing
-    # the field (it leaves whatever the previous project showed on screen),
-    # so a missing date is set directly via the lower-level input message
-    # instead - the same mechanism updateDateInput itself uses, just without
-    # its NULL-means-skip behaviour.
-    set_date_field <- function(input_id, date_value) {
-      if (is.na(date_value)) {
-        session$sendInputMessage(input_id, list(value = ""))
-      } else {
-        updateDateInput(session, input_id, value = date_value)
-      }
-    }
-    set_date_field("detail_pattern_received", proj$pattern_received)
-    set_date_field("detail_start_date", proj$start_date)
-    set_date_field("detail_deadline", proj$deadline)
+    set_date_input(session, "detail_pattern_received", proj$pattern_received)
+    set_date_input(session, "detail_start_date", proj$start_date)
+    set_date_input(session, "detail_deadline", proj$deadline)
     updateSelectInput(session, "detail_status", selected = proj$status)
     updateCheckboxInput(session, "detail_ravelry", value = isTRUE(proj$ravelry_project))
     updateTextAreaInput(session, "detail_notes", value = proj$notes)
@@ -413,10 +485,8 @@ server <- function(input, output, session) {
     ))
   })
 
-  # A numbered segment per stage, coloured in by how complete it is. Native
-  # HTML title tooltips are unreliable/hard to discover, so the stage names
-  # are shown in a plain-text legend below the bar instead of relying on
-  # hover.
+  # A numbered segment per stage, coloured by completion. Stage names are
+  # listed in the legend below rather than as hover tooltips.
   output$detail_stage_bar <- renderUI({
     req(input$detail_project)
     st <- stages_r() %>% filter(project_id == input$detail_project) %>% arrange(stage_order)
@@ -435,7 +505,7 @@ server <- function(input, output, session) {
         TRUE ~ 0
       )
       pct <- round(frac * 100)
-      # a stage mini-deadline only matters while the stage isn't done yet
+      # A mini-deadline's urgency only shows while the stage isn't done.
       border_colour <- "#F1DDE2"
       if (row$status != "done" && !is.na(row$stage_deadline)) {
         days_left <- as.numeric(row$stage_deadline - Sys.Date())
@@ -474,156 +544,27 @@ server <- function(input, output, session) {
       input$detail_start_date, input$detail_deadline, input$detail_status, input$detail_ravelry,
       input$detail_colour, input$detail_notes
     )
+    showNotification(paste0("Saved changes to ", input$detail_name), type = "message", duration = 4)
     bump()
   })
 
-  observeEvent(input$log_project, {
-    st <- stages_r() %>% filter(project_id == input$log_project) %>% arrange(stage_order)
-    choices <- if (nrow(st) == 0) {
-      character(0)
-    } else {
-      setNames(st$stage_id, paste0(st$stage_order, ". ", st$stage_name, " [", st$status, "]"))
-    }
-    updateSelectInput(session, "log_stage", choices = choices)
-  }, ignoreNULL = FALSE)
-
-  output$log_row_progress_ui <- renderUI({
-    req(input$log_stage)
-    st <- stages_r() %>% filter(stage_id == input$log_stage)
-    if (nrow(st) == 0 || is.na(st$total_rows[1])) {
-      return(NULL)
-    }
-    p(strong(paste0("Currently at row ", coalesce(st$rows_done[1], 0), " of ", st$total_rows[1], ".")))
-  })
-
-  # cap "now at row #" at the stage's total_rows, if it has row tracking
-  observeEvent(input$log_stage, {
-    st <- stages_r() %>% filter(stage_id == input$log_stage)
-    max_rows <- if (nrow(st) == 0) NA else st$total_rows[1]
-    updateNumericInput(session, "log_rows_done", max = max_rows)
-  })
-
-  observe({
-    p <- projects_r() %>% filter(status != "finished")
-    st <- stages_r() %>% filter(project_id %in% p$project_id) %>% arrange(project_id, stage_order)
-    if (nrow(st) == 0) {
-      updateSelectInput(session, "edit_stage", choices = character(0))
-    } else {
-      labels <- paste0(p$name[match(st$project_id, p$project_id)], " — ", st$stage_order, ". ", st$stage_name, " [", st$status, "]")
-      choices <- setNames(st$stage_id, labels)
-      updateSelectInput(session, "edit_stage", choices = choices, selected = input$edit_stage)
-    }
-  })
-
-  # load the selected stage's current values into the edit form
-  observeEvent(input$edit_stage, {
-    req(input$edit_stage)
-    st <- stages_r() %>% filter(stage_id == input$edit_stage)
-    if (nrow(st) == 0) {
-      return(NULL)
-    }
-    updateTextInput(session, "edit_name", value = st$stage_name[1])
-    # a custom category typed in previously isn't part of the fixed
-    # STAGE_CATEGORIES list, so (same issue as the yarn weight field) it
-    # has to be added back into the choices before it can be selected.
-    category_choices <- if (is.na(st$stage_category[1])) STAGE_CATEGORIES else union(STAGE_CATEGORIES, st$stage_category[1])
-    updateSelectizeInput(session, "edit_category", choices = category_choices, selected = st$stage_category[1])
-    updateSelectInput(session, "edit_status", selected = st$status[1])
-    updateSliderInput(session, "edit_portability", value = st$portability[1])
-    updateSliderInput(session, "edit_focus", value = st$focus[1])
-    updateNumericInput(session, "edit_est_hours", value = st$est_hours[1])
-    updateNumericInput(session, "edit_total_rows", value = st$total_rows[1])
-    # updateDateInput(value = NULL) is silently dropped rather than clearing
-    # the field (see the same issue on the Project details tab), so a
-    # missing deadline is set via the lower-level input message instead.
-    if (is.na(st$stage_deadline[1])) {
-      session$sendInputMessage("edit_stage_deadline", list(value = ""))
-    } else {
-      updateDateInput(session, "edit_stage_deadline", value = st$stage_deadline[1])
-    }
-  })
-
-  observeEvent(input$edit_submit, {
-    req(input$edit_stage)
-    edit_stage(
-      input$edit_stage, input$edit_name, input$edit_category, input$edit_portability, input$edit_focus,
-      input$edit_est_hours, input$edit_total_rows, input$edit_status, input$edit_stage_deadline
+  observeEvent(input$np_submit, {
+    req(input$np_name)
+    add_project(
+      input$np_name, input$np_designer, input$np_weight, input$np_needle, input$np_gauge,
+      input$np_size, input$np_pattern_received, input$np_start_date, input$np_deadline,
+      input$np_notes, input$np_colour
     )
+    showNotification(paste0("Added new project: ", input$np_name), type = "message", duration = 4)
+    updateTextInput(session, "np_name", value = "")
+    updateTextInput(session, "np_designer", value = "")
+    updateTextInput(session, "np_size", value = "")
+    updateTextAreaInput(session, "np_notes", value = "")
     bump()
   })
 
-  # ---- Overview: progress bars ---
-  output$progress_bars <- renderUI({
-    not_finished <- projects_r() %>% filter(status != "finished")
-    prog <- project_progress(not_finished, stages_r()) %>%
-      mutate(days_left = as.numeric(as.Date(deadline) - Sys.Date()))
+  # ---- Gantt ----
 
-    bars <- lapply(seq_len(nrow(prog)), function(i) {
-      row <- prog[i, ]
-      pct <- round(row$pct_complete * 100)
-      bar_colour <- if (!is.na(row$colour) && nzchar(row$colour)) row$colour else "#C9789A"
-      badge_colour <- urgency_colour(row$days_left)
-      tagList(
-        div(
-          style = "margin-bottom: 6px;",
-          strong(row$name),
-          span(
-            style = paste0(
-              "float:right; background:", badge_colour, "; color:white;",
-              "border-radius:999px; padding:2px 10px; font-size:12px;"
-            ),
-            paste0(row$days_left, " days left (", format(row$deadline, "%d %b %Y"), ")")
-          )
-        ),
-        div(
-          style = "background:#F1DDE2; border-radius:999px; height:22px; margin-bottom:18px; overflow:hidden;",
-          div(
-            style = paste0(
-              "background:", bar_colour, "; width:", pct, "%; height:100%; color:white;",
-              "text-align:right; padding-right:8px; font-size:12px; line-height:22px; border-radius:999px;"
-            ),
-            paste0(pct, "%")
-          )
-        )
-      )
-    })
-    tagList(bars)
-  })
-
-  output$upcoming_stage_deadlines <- renderDT({
-    # includes pending projects too - a designer's stage schedule is real
-    # even before the pattern's arrived or you've cast on, only a genuinely
-    # finished project's deadlines stop mattering
-    not_finished <- projects_r() %>% filter(status != "finished") %>% select(project_id, name, colour)
-    upcoming <- stages_r() %>%
-      filter(status != "done", !is.na(stage_deadline)) %>%
-      inner_join(not_finished, by = "project_id") %>%
-      mutate(days_left = as.numeric(stage_deadline - Sys.Date())) %>%
-      filter(days_left <= 30) %>%
-      arrange(stage_deadline) %>%
-      select(name, stage_name, status, stage_deadline, days_left, colour)
-
-    display <- upcoming %>% select(-colour)
-    dt <- datatable(display, options = list(dom = "t", pageLength = 15), rownames = FALSE)
-
-    if (nrow(upcoming) == 0) {
-      return(dt)
-    }
-
-    project_colours <- upcoming %>% distinct(name, colour)
-    dt %>%
-      formatStyle(
-        "name",
-        backgroundColor = styleEqual(project_colours$name, sapply(project_colours$colour, hex_to_rgba))
-      ) %>%
-      formatStyle(
-        "days_left",
-        backgroundColor = styleInterval(c(0, 4, 8), c("#7A1F1F", "#C25C5C", "#E8B54A", "#8FAE8B")),
-        color = "white"
-      )
-  })
-
-  # ---- Gantt ---
   output$gantt_plot <- renderPlotly({
     gd <- gantt_data(projects_r(), stages_r(), sessions_r(), hours_per_week = input$gantt_hours_per_day * 7)
     if (nrow(gd) == 0) {
@@ -648,7 +589,8 @@ server <- function(input, output, session) {
     p %>% layout(xaxis = list(title = "Date"), yaxis = list(title = ""))
   })
 
-  # ---- Recommender ---
+  # ---- What to knit now ----
+
   output$recommend_table <- renderDT({
     rec <- recommend_projects(
       projects_r(), stages_r(), sessions_r(), input$rec_location, input$rec_energy,
@@ -657,7 +599,34 @@ server <- function(input, output, session) {
     datatable(rec, options = list(dom = "t", pageLength = 10), rownames = FALSE)
   })
 
-  # ---- Log a session ---
+  # ---- Log a session ----
+
+  observeEvent(input$log_project, {
+    st <- stages_r() %>% filter(project_id == input$log_project) %>% arrange(stage_order)
+    choices <- if (nrow(st) == 0) {
+      character(0)
+    } else {
+      setNames(st$stage_id, paste0(st$stage_order, ". ", st$stage_name, " [", st$status, "]"))
+    }
+    updateSelectInput(session, "log_stage", choices = choices)
+  }, ignoreNULL = FALSE)
+
+  output$log_row_progress_ui <- renderUI({
+    req(input$log_stage)
+    st <- stages_r() %>% filter(stage_id == input$log_stage)
+    if (nrow(st) == 0 || is.na(st$total_rows[1])) {
+      return(NULL)
+    }
+    p(strong(paste0("Currently at row ", coalesce(st$rows_done[1], 0), " of ", st$total_rows[1], ".")))
+  })
+
+  # Caps "now at row #" at the stage's total_rows.
+  observeEvent(input$log_stage, {
+    st <- stages_r() %>% filter(stage_id == input$log_stage)
+    max_rows <- if (nrow(st) == 0) NA else st$total_rows[1]
+    updateNumericInput(session, "log_rows_done", max = max_rows)
+  })
+
   observeEvent(input$log_submit, {
     req(input$log_project, input$log_stage)
     append_session(
@@ -671,6 +640,11 @@ server <- function(input, output, session) {
     if (!is.na(input$log_rows_done)) {
       update_stage_rows(input$log_stage, input$log_rows_done)
     }
+    proj_name <- projects_r() %>% filter(project_id == input$log_project) %>% pull(name)
+    stage_name <- stages_r() %>% filter(stage_id == input$log_stage) %>% pull(stage_name)
+    note <- if (input$log_stage_status == "done") done_hours_note(input$log_stage) else ""
+    showNotification(paste0("Logged ", input$log_hours, "h to ", proj_name, " — ", stage_name, note), type = "message", duration = 5)
+
     updateNumericInput(session, "log_hours", value = 1)
     updateNumericInput(session, "log_rows_done", value = NA)
     updateTextAreaInput(session, "log_notes", value = "")
@@ -685,35 +659,23 @@ server <- function(input, output, session) {
     datatable(s, options = list(pageLength = 8), rownames = FALSE)
   })
 
-  # ---- Manage: add project ---
-  observeEvent(input$np_submit, {
-    req(input$np_name)
-    add_project(
-      input$np_name, input$np_designer, input$np_weight, input$np_needle, input$np_gauge,
-      input$np_size, input$np_pattern_received, input$np_start_date, input$np_deadline,
-      input$np_notes, input$np_colour
-    )
-    updateTextInput(session, "np_name", value = "")
-    updateTextInput(session, "np_designer", value = "")
-    updateTextInput(session, "np_size", value = "")
-    updateTextAreaInput(session, "np_notes", value = "")
-    bump()
-  })
+  # ---- Manage stages ----
 
-  # ---- Manage: add stage ---
   observeEvent(input$ns_submit, {
     req(input$ns_project, input$ns_name)
     add_stage(
       input$ns_project, input$ns_name, input$ns_category, input$ns_order, input$ns_portability,
       input$ns_focus, input$ns_est_hours, input$ns_total_rows, input$ns_stage_deadline
     )
+    proj_name <- projects_r() %>% filter(project_id == input$ns_project) %>% pull(name)
+    showNotification(paste0("Added stage \"", input$ns_name, "\" to ", proj_name), type = "message", duration = 4)
     updateTextInput(session, "ns_name", value = "")
     updateDateInput(session, "ns_stage_deadline", value = NA)
     bump()
   })
 
   output$stages_table <- renderDT({
-    not_finished <- projects_r() %>% filter(status != "finished") %>% select(project_id, name)
+    not_finished <- not_past_deadline(projects_r()) %>% select(project_id, name)
     st <- stages_r() %>%
       inner_join(not_finished, by = "project_id") %>%
       arrange(name, stage_order) %>%
@@ -721,7 +683,51 @@ server <- function(input, output, session) {
     datatable(st, options = list(pageLength = 10), rownames = FALSE)
   })
 
-  # ---- Analytics ---
+  observe({
+    p <- not_past_deadline(projects_r())
+    st <- stages_r() %>% filter(project_id %in% p$project_id) %>% arrange(project_id, stage_order)
+    if (nrow(st) == 0) {
+      updateSelectInput(session, "edit_stage", choices = character(0))
+    } else {
+      labels <- paste0(p$name[match(st$project_id, p$project_id)], " — ", st$stage_order, ". ", st$stage_name, " [", st$status, "]")
+      choices <- setNames(st$stage_id, labels)
+      updateSelectInput(session, "edit_stage", choices = choices, selected = input$edit_stage)
+    }
+  })
+
+  # Loads the selected stage's current values into the edit form.
+  observeEvent(input$edit_stage, {
+    req(input$edit_stage)
+    st <- stages_r() %>% filter(stage_id == input$edit_stage)
+    if (nrow(st) == 0) {
+      return(NULL)
+    }
+    updateTextInput(session, "edit_name", value = st$stage_name[1])
+    updateSelectizeInput(
+      session, "edit_category",
+      choices = choices_with_current(STAGE_CATEGORIES, st$stage_category[1]), selected = st$stage_category[1]
+    )
+    updateSelectInput(session, "edit_status", selected = st$status[1])
+    updateSliderInput(session, "edit_portability", value = st$portability[1])
+    updateSliderInput(session, "edit_focus", value = st$focus[1])
+    updateNumericInput(session, "edit_est_hours", value = st$est_hours[1])
+    updateNumericInput(session, "edit_total_rows", value = st$total_rows[1])
+    set_date_input(session, "edit_stage_deadline", st$stage_deadline[1])
+  })
+
+  observeEvent(input$edit_submit, {
+    req(input$edit_stage)
+    edit_stage(
+      input$edit_stage, input$edit_name, input$edit_category, input$edit_portability, input$edit_focus,
+      input$edit_est_hours, input$edit_total_rows, input$edit_status, input$edit_stage_deadline
+    )
+    note <- if (input$edit_status == "done") done_hours_note(input$edit_stage) else ""
+    showNotification(paste0("Saved changes to stage: ", input$edit_name, note), type = "message", duration = 5)
+    bump()
+  })
+
+  # ---- Analytics ----
+
   output$hours_per_project_plot <- renderPlotly({
     hp <- total_hours_per_project(sessions_r(), projects_r())
     plot_ly(hp, x = ~name, y = ~total_hours, type = "bar", marker = list(color = ~colour)) %>%

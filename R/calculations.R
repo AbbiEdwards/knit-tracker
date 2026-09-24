@@ -3,10 +3,9 @@ library(lubridate)
 
 # ---- progress ---------------------------------------------------------
 
-# Progress per project, weighted by est_hours where available (else equal
-# weight per stage). "done" counts as 1, "not_started" as 0. An "in_progress"
-# stage counts as its row-completion fraction if it has row tracking,
-# otherwise a flat 0.5 guess.
+# Project completion %, weighted by est_hours per stage (equal weight if
+# blank). done = 1, in_progress = row fraction (or 0.5 without row
+# tracking), not_started = 0.
 project_progress <- function(projects, stages) {
   stages %>%
     mutate(
@@ -35,9 +34,8 @@ project_progress <- function(projects, stages) {
 
 # ---- time estimates from history ---------------------------------------
 
-# Average hours actually logged per stage, by yarn weight, to refine future
-# estimates / sanity-check est_hours (and, over time, to judge how many
-# projects of a given yarn weight are realistic to take on at once).
+# Total and average hours logged per session, grouped by stage category and
+# yarn weight.
 hours_per_stage_by_weight <- function(sessions, stages, projects) {
   sessions %>%
     left_join(stages %>% select(stage_id, stage_category), by = "stage_id") %>%
@@ -48,6 +46,7 @@ hours_per_stage_by_weight <- function(sessions, stages, projects) {
     arrange(yarn_weight, stage_category)
 }
 
+# Total hours logged per project.
 total_hours_per_project <- function(sessions, projects) {
   sessions %>%
     group_by(project_id) %>%
@@ -57,15 +56,10 @@ total_hours_per_project <- function(sessions, projects) {
     arrange(desc(total_hours))
 }
 
-# Remaining estimated hours for a project: sum of est_hours for stages not
-# yet done (in_progress counted at half), falling back to average historical
-# hours/stage for that yarn weight when est_hours is missing, or a generic
-# 4-hour guess when there's no history either.
+# Remaining hours per project: sum of est_hours across not-done stages
+# (in_progress at half weight). Missing est_hours falls back to the average
+# hours per completed stage of that yarn weight, or 4 hours if no history.
 project_remaining_hours <- function(projects, stages, sessions) {
-  # Historical average is per completed STAGE, not per logged session - a
-  # stage finished across four 1-hour sessions took 4 hours, not 1, so
-  # sessions are summed up to stage level (for stages actually marked
-  # "done") before averaging by yarn weight.
   hist_avg <- sessions %>%
     group_by(stage_id) %>%
     summarise(stage_hours = sum(hours), .groups = "drop") %>%
@@ -116,14 +110,12 @@ energy_max_focus <- c(
   "3 - High / fresh" = 3
 )
 
-# A short session isn't worth the setup/orientation cost of starting a stage
-# cold, so it's restricted to stages already under way.
 TIME_CHOICES <- c("Quick (under ~45 min)", "Medium (up to ~2 hrs)", "Long / open-ended")
 
 # Suggests active projects whose current stage fits the given location,
-# energy level and time available, ranked by "slack" (deadline minus the
-# time still needed at hours_per_week) so the most time-pressured project
-# comes first - not just whichever deadline happens to be soonest.
+# energy and time available. "Quick" restricts to stages already
+# in_progress. Ranked by slack (deadline minus time needed at
+# hours_per_week), soonest-critical first.
 recommend_projects <- function(projects, stages, sessions, location, energy,
                                 time_available, hours_per_week = 14) {
   min_portability <- location_min_portability[[location]]
@@ -159,8 +151,8 @@ recommend_projects <- function(projects, stages, sessions, location, energy,
 
 # ---- gantt data ---------------------------------------------------------
 
-# For each active project: a bar from today to the estimated finish date if
-# worked on exclusively from now at hours_per_week, plus the real deadline.
+# Per active project: a bar from today to the estimated finish date at
+# hours_per_week, plus the real deadline.
 gantt_data <- function(projects, stages, sessions, hours_per_week = 14) {
   remaining <- project_remaining_hours(projects, stages, sessions)
 

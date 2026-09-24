@@ -9,12 +9,8 @@ if (!exists("APP_DATA_DIR")) {
 
 # ---- column specs --------------------------------------------------------
 
-# Date columns are read as plain text and parsed with parse_flex_date()
-# rather than col_date(), because a spreadsheet program (e.g. Excel) will
-# silently reformat a date cell to the system locale (e.g. "12/09/2026")
-# the moment the file is opened or saved there, regardless of how it was
-# originally written - a strict single-format reader would then read every
-# date as NA.
+# Date columns are read as text and parsed with parse_flex_date(), not
+# col_date(), so both ISO and locale-reformatted (e.g. Excel) dates work.
 projects_spec <- cols(
   project_id       = col_character(),
   name             = col_character(),
@@ -58,9 +54,7 @@ sessions_spec <- cols(
   notes      = col_character()
 )
 
-# Accepts ISO (2026-09-12), UK (12/09/2026) and US (09/12/2026 - tried last,
-# since UK usage is assumed by default) date text and returns a Date, or NA
-# if it genuinely can't be parsed.
+# Parses ISO, UK (dmy) or US (mdy) date text into a Date, or NA.
 parse_flex_date <- function(x) {
   as.Date(parse_date_time(x, orders = c("ymd", "dmy", "mdy"), quiet = TRUE))
 }
@@ -82,8 +76,7 @@ read_sessions <- function() {
     mutate(date = parse_flex_date(date))
 }
 
-# na = "" keeps missing values as blank cells rather than literal "NA" text,
-# so the CSVs stay easy to read and hand-edit outside the app.
+# na = "" writes missing values as blank cells, not literal "NA" text.
 write_projects <- function(df) {
   write_csv(df, file.path(APP_DATA_DIR, "projects.csv"), na = "")
 }
@@ -98,14 +91,18 @@ write_sessions <- function(df) {
 
 # ---- id generation ---------------------------------------------------------
 
-# Generates the next sequential id for a given prefix, e.g. next_id(c("P1",
-# "P2"), "P") returns "P3". Ignores any existing ids that don't match the
-# prefix + integer pattern.
+# Next sequential id for a prefix, e.g. next_id(c("P1", "P2"), "P") -> "P3".
 next_id <- function(existing_ids, prefix) {
   nums <- suppressWarnings(as.integer(gsub(paste0("^", prefix), "", existing_ids)))
   nums <- nums[!is.na(nums)]
   next_n <- if (length(nums) == 0) 1 else max(nums) + 1
   paste0(prefix, next_n)
+}
+
+# A NULL or zero-length value (e.g. a cleared date input) is replaced with
+# na instead of being assigned as-is, which would error on a single row.
+or_na <- function(x, na = NA) {
+  if (is.null(x) || length(x) == 0) na else x
 }
 
 # ---- mutations ---------------------------------------------------------
@@ -152,19 +149,12 @@ add_project <- function(name, designer, yarn_weight, needle_size, gauge, size,
   invisible(new_id)
 }
 
-# Updates every editable field of an existing project at once (used by the
-# "Project details" tab), overwriting that row in place rather than adding
-# a new one.
+# Overwrites every editable field of an existing project in place.
 edit_project <- function(project_id, name, designer, yarn_weight, needle_size,
                           gauge, size, pattern_received, start_date, deadline,
                           status, ravelry_project, colour, notes) {
   projects <- read_projects()
   i <- which(projects$project_id == project_id)
-
-  # Any field left blank (e.g. a cleared date input) can arrive as NULL,
-  # which is zero-length and errors when assigned into a single row -
-  # fall back to NA rather than propagating the NULL.
-  or_na <- function(x, na = NA) if (is.null(x) || length(x) == 0) na else x
 
   projects$name[i] <- or_na(name)
   projects$designer[i] <- or_na(designer)
@@ -183,13 +173,11 @@ edit_project <- function(project_id, name, designer, yarn_weight, needle_size,
   write_projects(projects)
 }
 
+# stage_id is a sequential id per project, independent of stage_order, so
+# two stages sharing an order never collide into the same id.
 add_stage <- function(project_id, stage_name, stage_category, stage_order, portability, focus,
                        est_hours, total_rows = NA, stage_deadline = NA) {
   stages <- read_stages()
-  # stage_id is a sequential id per project, independent of stage_order, so
-  # two stages accidentally given the same order never collide into the
-  # same id (which would silently make every lookup by stage_id affect or
-  # return both rows at once).
   existing_ids <- stages$stage_id[stages$project_id == project_id]
   new_id <- next_id(existing_ids, paste0(project_id, "-S"))
   new_row <- tibble(
@@ -202,7 +190,7 @@ add_stage <- function(project_id, stage_name, stage_category, stage_order, porta
     focus = as.integer(focus),
     est_hours = as.numeric(est_hours),
     status = "not_started",
-    stage_deadline = if (is.null(stage_deadline) || length(stage_deadline) == 0) as.Date(NA) else as.Date(stage_deadline),
+    stage_deadline = as.Date(or_na(stage_deadline, as.Date(NA))),
     total_rows = as.integer(total_rows),
     rows_done = if (is.na(total_rows)) NA_integer_ else 0L
   )
@@ -210,9 +198,23 @@ add_stage <- function(project_id, stage_name, stage_category, stage_order, porta
   invisible(new_id)
 }
 
+# Replaces a stage's est_hours with its real total logged hours, once it's
+# marked "done". Left untouched if nothing's been logged for it yet.
+sync_est_hours_from_sessions <- function(stages, stage_id) {
+  sessions <- read_sessions()
+  actual_hours <- sum(sessions$hours[sessions$stage_id == stage_id], na.rm = TRUE)
+  if (actual_hours > 0) {
+    stages$est_hours[stages$stage_id == stage_id] <- actual_hours
+  }
+  stages
+}
+
 update_stage_status <- function(stage_id, new_status) {
   stages <- read_stages()
   stages$status[stages$stage_id == stage_id] <- new_status
+  if (new_status == "done") {
+    stages <- sync_est_hours_from_sessions(stages, stage_id)
+  }
   write_stages(stages)
 }
 
@@ -222,21 +224,12 @@ update_stage_rows <- function(stage_id, rows_done) {
   write_stages(stages)
 }
 
-# Updates every editable field of an existing stage at once (used by the
-# "Edit a stage" panel). Keeps rows_done consistent if total_rows is added
-# or removed.
+# Overwrites every editable field of an existing stage in place. Keeps
+# rows_done consistent if total_rows is added or removed.
 edit_stage <- function(stage_id, stage_name, stage_category, portability, focus, est_hours,
                         total_rows, status, stage_deadline = NA) {
   stages <- read_stages()
   i <- which(stages$stage_id == stage_id)
-
-  # a cleared date input arrives as NULL, which is zero-length and errors
-  # when assigned into a single row - fall back to NA instead.
-  stage_deadline_value <- if (is.null(stage_deadline) || length(stage_deadline) == 0) {
-    as.Date(NA)
-  } else {
-    as.Date(stage_deadline)
-  }
 
   stages$stage_name[i] <- stage_name
   stages$stage_category[i] <- stage_category
@@ -245,12 +238,16 @@ edit_stage <- function(stage_id, stage_name, stage_category, portability, focus,
   stages$est_hours[i] <- as.numeric(est_hours)
   stages$total_rows[i] <- as.integer(total_rows)
   stages$status[i] <- status
-  stages$stage_deadline[i] <- stage_deadline_value
+  stages$stage_deadline[i] <- as.Date(or_na(stage_deadline, as.Date(NA)))
 
   if (is.na(stages$total_rows[i])) {
     stages$rows_done[i] <- NA_integer_
   } else if (is.na(stages$rows_done[i])) {
     stages$rows_done[i] <- 0L
+  }
+
+  if (status == "done") {
+    stages <- sync_est_hours_from_sessions(stages, stage_id)
   }
 
   write_stages(stages)
