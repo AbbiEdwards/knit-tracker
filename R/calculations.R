@@ -56,6 +56,21 @@ total_hours_per_project <- function(sessions, projects) {
     arrange(desc(total_hours))
 }
 
+# Total hours logged per calendar day, from the first logged session to
+# today, with 0 filled in for days nothing was logged.
+hours_per_day <- function(sessions) {
+  if (nrow(sessions) == 0) {
+    return(tibble(date = as.Date(character()), total_hours = numeric()))
+  }
+  all_days <- tibble(date = seq(min(sessions$date), Sys.Date(), by = "day"))
+  sessions %>%
+    group_by(date) %>%
+    summarise(total_hours = sum(hours), .groups = "drop") %>%
+    right_join(all_days, by = "date") %>%
+    mutate(total_hours = coalesce(total_hours, 0)) %>%
+    arrange(date)
+}
+
 # Remaining hours per project: sum of est_hours across not-done stages
 # (in_progress at half weight). Missing est_hours falls back to the average
 # hours per completed stage of that yarn weight, or 4 hours if no history.
@@ -167,4 +182,71 @@ gantt_data <- function(projects, stages, sessions, hours_per_week = 14) {
       deadline = as.Date(deadline)
     ) %>%
     select(project_id, name, start, finish_if_started_now, deadline, remaining_hours)
+}
+
+# Remaining hours per project (deadline not yet passed), sorted by deadline,
+# with the cumulative hours needed by each deadline and the pace that would
+# be required, assuming today's hours can be freely allocated to whichever
+# project is due soonest.
+critical_pace_by_deadline <- function(projects, stages, sessions) {
+  active <- projects %>% filter(is.na(deadline) | as.Date(deadline) >= Sys.Date())
+  remaining <- project_remaining_hours(active, stages, sessions)
+
+  df <- active %>%
+    left_join(remaining, by = "project_id") %>%
+    mutate(remaining_hours = coalesce(remaining_hours, 0), deadline = as.Date(deadline)) %>%
+    select(name, deadline, remaining_hours) %>%
+    arrange(deadline)
+
+  df %>%
+    rowwise() %>%
+    mutate(
+      days_to_here = as.numeric(deadline - Sys.Date()),
+      cum_hours_needed = sum(df$remaining_hours[df$deadline <= deadline]),
+      required_pace = ifelse(days_to_here > 0, cum_hours_needed / days_to_here, Inf)
+    ) %>%
+    ungroup()
+}
+
+# The single tightest deadline: the one needing the highest sustained daily
+# pace (from today) to hit every deadline up to and including it.
+critical_bottleneck <- function(projects, stages, sessions) {
+  cp <- critical_pace_by_deadline(projects, stages, sessions)
+  cp[which.max(cp$required_pace), ]
+}
+
+# ---- burndown ---------------------------------------------------------
+
+# Actual total remaining hours (active projects) on each day since the
+# first logged session, reconstructed as today's total plus hours logged
+# after that day. Paired with an ideal straight-line pace to 0 hours at
+# the furthest deadline.
+burndown_data <- function(projects, stages, sessions) {
+  active <- projects %>% filter(is.na(deadline) | as.Date(deadline) >= Sys.Date())
+  remaining_now <- sum(project_remaining_hours(active, stages, sessions)$remaining_hours)
+  final_deadline <- suppressWarnings(max(as.Date(active$deadline), na.rm = TRUE))
+
+  # Nothing to plot without at least one project with a real deadline.
+  if (!is.finite(final_deadline)) {
+    return(tibble(date = as.Date(character()), hours = numeric(), line = character()))
+  }
+
+  start_date <- if (nrow(sessions) == 0) Sys.Date() else min(sessions$date)
+  actual_dates <- seq(start_date, Sys.Date(), by = "day")
+  actual <- tibble(date = actual_dates) %>%
+    rowwise() %>%
+    mutate(hours = remaining_now + sum(sessions$hours[sessions$date > date])) %>%
+    ungroup() %>%
+    mutate(line = "Actual")
+
+  ideal_dates <- seq(start_date, final_deadline, by = "day")
+  start_hours <- actual$hours[1]
+  span_days <- as.numeric(final_deadline - start_date)
+  ideal <- tibble(date = ideal_dates) %>%
+    mutate(
+      hours = pmax(0, start_hours * (1 - as.numeric(date - start_date) / span_days)),
+      line = "Ideal"
+    )
+
+  bind_rows(actual, ideal)
 }

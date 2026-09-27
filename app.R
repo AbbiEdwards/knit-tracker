@@ -212,6 +212,16 @@ ui <- page_navbar(
   nav_panel(
     "Gantt",
     card(
+      card_header("Can I hit every deadline?"),
+      p("The minimum daily pace you'd need to sustain, starting today, to hit every deadline in turn - assuming you always work on whichever is most urgent. Whichever project sets this number is your real bottleneck, not necessarily whichever deadline is soonest."),
+      uiOutput("critical_pace_summary")
+    ),
+    card(
+      card_header("Burndown: total hours remaining, across all projects"),
+      p("Actual (solid) is your real total remaining hours over time, reconstructed from logged sessions. Ideal (dashed) is a straight line to 0 hours at your furthest deadline. Above the ideal line means you're behind."),
+      plotlyOutput("burndown_plot", height = "350px")
+    ),
+    card(
       card_header("Remaining time needed vs. deadline"),
       p(paste(
         "Bars show the window from today to your estimated finish date if",
@@ -335,6 +345,11 @@ ui <- page_navbar(
     layout_columns(
       col_widths = 12,
       card(
+        card_header("Hours per day"),
+        p(style = "font-size:12px; color:#8A6E78;", "Every calendar day since your first logged session (0 where nothing was logged), with a dashed line at your actual daily average."),
+        plotlyOutput("hours_per_day_plot", height = "300px")
+      ),
+      card(
         card_header("Total hours logged per project"),
         plotlyOutput("hours_per_project_plot", height = "350px")
       ),
@@ -443,7 +458,7 @@ server <- function(input, output, session) {
       ) %>%
       formatStyle(
         "days_left",
-        backgroundColor = styleInterval(c(0, 4, 8), unname(URGENCY_COLOURS)),
+        backgroundColor = styleInterval(c(-1, 3, 7), unname(URGENCY_COLOURS)),
         color = "white"
       )
   })
@@ -564,6 +579,37 @@ server <- function(input, output, session) {
   })
 
   # ---- Gantt ----
+
+  output$critical_pace_summary <- renderUI({
+    bn <- critical_bottleneck(projects_r(), stages_r(), sessions_r())
+    if (nrow(bn) == 0) {
+      return(p(em("No active projects with a deadline yet.")))
+    }
+    pace_colour <- if (bn$required_pace > 3) URGENCY_COLOURS[["red"]] else if (bn$required_pace > 2) URGENCY_COLOURS[["amber"]] else URGENCY_COLOURS[["safe"]]
+    tagList(
+      div(
+        style = paste0("font-size:28px; font-weight:700; color:", pace_colour, ";"),
+        paste0(round(bn$required_pace, 2), " h/day")
+      ),
+      p(
+        style = "font-size:13px; color:#8A6E78;",
+        paste0(
+          "Bottleneck: ", bn$name, " (deadline ", format(bn$deadline, "%d %b %Y"), ", ",
+          round(bn$cum_hours_needed, 1), "h needed across everything due by then, in ", bn$days_to_here, " days)."
+        )
+      )
+    )
+  })
+
+  output$burndown_plot <- renderPlotly({
+    bd <- burndown_data(projects_r(), stages_r(), sessions_r())
+    if (nrow(bd) == 0) {
+      return(plotly_empty())
+    }
+    plot_ly(bd, x = ~date, y = ~hours, color = ~line, colors = c(Actual = "#C25C5C", Ideal = "#8A6E78")) %>%
+      add_lines(linetype = ~line, linetypes = c(Actual = "solid", Ideal = "dash")) %>%
+      layout(xaxis = list(title = ""), yaxis = list(title = "Total hours remaining"))
+  })
 
   output$gantt_plot <- renderPlotly({
     gd <- gantt_data(projects_r(), stages_r(), sessions_r(), hours_per_week = input$gantt_hours_per_day * 7)
@@ -727,6 +773,20 @@ server <- function(input, output, session) {
   })
 
   # ---- Analytics ----
+
+  output$hours_per_day_plot <- renderPlotly({
+    hpd <- hours_per_day(sessions_r())
+    if (nrow(hpd) == 0) {
+      return(plotly_empty())
+    }
+    mean_hours <- mean(hpd$total_hours)
+    plot_ly(hpd, x = ~date, y = ~total_hours, type = "bar", marker = list(color = "#C9789A"), name = "Hours logged") %>%
+      add_lines(
+        x = ~date, y = mean_hours, line = list(color = "#4A3540", dash = "dash"),
+        name = paste0("Mean: ", round(mean_hours, 2), "h/day")
+      ) %>%
+      layout(xaxis = list(title = ""), yaxis = list(title = "Hours logged"), showlegend = TRUE)
+  })
 
   output$hours_per_project_plot <- renderPlotly({
     hp <- total_hours_per_project(sessions_r(), projects_r())
