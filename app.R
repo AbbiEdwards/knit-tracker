@@ -15,7 +15,7 @@ YARN_WEIGHTS <- c("lace", "fingering", "sport", "dk", "worsted", "aran", "bulky"
 # accepted (selectizeInput create = TRUE).
 STAGE_CATEGORIES <- c(
   "Swatch", "Back", "Front", "Right Front", "Left Front", "Body", "Sleeves",
-  "Cuffs", "Shoulders", "Yoke", "Colourwork Yoke", "Neckband", "Back Neck",
+  "Cuffs", "Shoulders", "Yoke", "Colourwork Yoke", "Colourwork Body", "Neckband", "Back Neck",
   "Collar", "Hem", "Button band", "Embroidery", "Finishing", "Other"
 )
 LOCATIONS <- names(location_min_portability)
@@ -248,7 +248,7 @@ ui <- page_navbar(
       ),
       card(
         card_header("Suggested projects (most time-pressured first)"),
-        p("Ranked by slack: deadline minus the time still needed at your pace - not just whichever deadline is soonest."),
+        p(style = "font-size:12px; color:#8A6E78;", "Ranked by the same critical-path logic as the Gantt tab: slack once every other deadline due before this one is accounted for, not just this project's own remaining hours. The top pick can change whenever any project's progress or deadline shifts."),
         DTOutput("recommend_table")
       )
     )
@@ -356,6 +356,11 @@ ui <- page_navbar(
       card(
         card_header("Hours per logged session, by stage category and yarn weight (from your history)"),
         DTOutput("hours_per_stage_table")
+      ),
+      card(
+        card_header("Estimate accuracy"),
+        p(style = "font-size:12px; color:#8A6E78;", "Completed stages: actual hours logged vs. the estimate you made before starting. Only available for stages finished since original_est_hours was added - earlier ones have no comparison recorded."),
+        DTOutput("estimate_accuracy_table")
       )
     )
   )
@@ -641,8 +646,16 @@ server <- function(input, output, session) {
     rec <- recommend_projects(
       projects_r(), stages_r(), sessions_r(), input$rec_location, input$rec_energy,
       input$rec_time, hours_per_week = input$rec_hours_per_day * 7
+    ) %>% select(-project_id)
+    dt <- datatable(rec, options = list(dom = "t", pageLength = 10), rownames = FALSE)
+    if (nrow(rec) == 0) {
+      return(dt)
+    }
+    dt %>% formatStyle(
+      "critical_slack_days",
+      backgroundColor = styleInterval(c(-1, 3, 7), unname(URGENCY_COLOURS)),
+      color = "white"
     )
-    datatable(rec, options = list(dom = "t", pageLength = 10), rownames = FALSE)
   })
 
   # ---- Log a session ----
@@ -797,6 +810,19 @@ server <- function(input, output, session) {
   output$hours_per_stage_table <- renderDT({
     hs <- hours_per_stage_by_weight(sessions_r(), stages_r(), projects_r())
     datatable(hs, options = list(pageLength = 10), rownames = FALSE)
+  })
+
+  output$estimate_accuracy_table <- renderDT({
+    ea <- estimate_accuracy(stages_r(), sessions_r(), projects_r())
+    dt <- datatable(ea, options = list(pageLength = 10), rownames = FALSE)
+    if (nrow(ea) == 0) {
+      return(dt)
+    }
+    dt %>% formatStyle(
+      "diff_pct",
+      backgroundColor = styleInterval(c(-20, 20), c(URGENCY_COLOURS[["safe"]], "white", URGENCY_COLOURS[["red"]])),
+      color = styleInterval(c(-20, 20), c("white", "#4A3540", "white"))
+    )
   })
 }
 
