@@ -237,20 +237,16 @@ ui <- page_navbar(
 
   nav_panel(
     "What to knit now",
-    layout_columns(
-      col_widths = c(4, 8),
-      card(
-        card_header("Right now I am..."),
-        selectInput("rec_location", "Where I'm knitting:", choices = LOCATIONS),
-        selectInput("rec_energy", "Energy / focus available:", choices = ENERGIES),
-        selectInput("rec_time", "Time I have:", choices = TIME_CHOICES),
-        numericInput("rec_hours_per_day", "Assumed knitting pace (hours/day, for ranking urgency)", value = 2, min = 0.25, step = 0.25)
+    card(
+      fillable = FALSE,
+      card_header("Suggested projects (most time-pressured first)"),
+      layout_columns(
+        col_widths = c(6, 6),
+        numericInput("rec_hours_per_day", "Assumed knitting pace (hours/day, for ranking urgency)", value = 2, min = 0.25, step = 0.25),
+        div(class = "align-with-input", actionButton("rec_use_mean", "Use my current mean", class = "btn-primary"))
       ),
-      card(
-        card_header("Suggested projects (most time-pressured first)"),
-        p(style = "font-size:12px; color:#8A6E78;", "Ranked by the same critical-path logic as the Gantt tab: slack once every other deadline due before this one is accounted for, not just this project's own remaining hours. The top pick can change whenever any project's progress or deadline shifts."),
-        DTOutput("recommend_table")
-      )
+      p(style = "font-size:12px; color:#8A6E78;", "Ranked by the same critical-path logic as the Gantt tab: slack once every other deadline due before this one is accounted for, not just this project's own remaining hours. The top pick can change whenever any project's progress or deadline shifts."),
+      DTOutput("recommend_table", fill = FALSE)
     )
   ),
 
@@ -644,18 +640,28 @@ server <- function(input, output, session) {
 
   output$recommend_table <- renderDT({
     rec <- recommend_projects(
-      projects_r(), stages_r(), sessions_r(), input$rec_location, input$rec_energy,
-      input$rec_time, hours_per_week = input$rec_hours_per_day * 7
+      projects_r(), stages_r(), sessions_r(), hours_per_week = input$rec_hours_per_day * 7
     ) %>% select(-project_id)
     dt <- datatable(rec, options = list(dom = "t", pageLength = 10), rownames = FALSE)
     if (nrow(rec) == 0) {
       return(dt)
     }
-    dt %>% formatStyle(
-      "critical_slack_days",
-      backgroundColor = styleInterval(c(-1, 3, 7), unname(URGENCY_COLOURS)),
-      color = "white"
-    )
+    dt %>%
+      formatRound("required_pace", 2) %>%
+      formatStyle(
+        "critical_slack_days",
+        backgroundColor = styleInterval(c(-1, 3, 7), unname(URGENCY_COLOURS)),
+        color = "white"
+      )
+  })
+
+  observeEvent(input$rec_use_mean, {
+    hpd <- hours_per_day(sessions_r())
+    if (nrow(hpd) == 0) {
+      showNotification("No sessions logged yet - nothing to average.", type = "warning", duration = 4)
+      return()
+    }
+    updateNumericInput(session, "rec_hours_per_day", value = round(mean(hpd$total_hours), 2))
   })
 
   # ---- Log a session ----

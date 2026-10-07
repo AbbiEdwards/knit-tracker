@@ -81,13 +81,13 @@ estimate_accuracy <- function(stages, sessions, projects) {
       sessions %>% group_by(stage_id) %>% summarise(actual_hours = sum(hours), .groups = "drop"),
       by = "stage_id"
     ) %>%
-    left_join(projects %>% select(project_id, name, yarn_weight), by = "project_id") %>%
+    left_join(projects %>% select(project_id, name), by = "project_id") %>%
     mutate(
       actual_hours = coalesce(actual_hours, 0),
       diff_hours = round(actual_hours - original_est_hours, 2),
       diff_pct = round((actual_hours - original_est_hours) / original_est_hours * 100, 0)
     ) %>%
-    select(name, stage_name, stage_category, yarn_weight, original_est_hours, actual_hours, diff_hours, diff_pct) %>%
+    select(name, stage_name, stage_category, original_est_hours, actual_hours, diff_hours, diff_pct) %>%
     arrange(desc(abs(diff_pct)))
 }
 
@@ -145,35 +145,22 @@ energy_max_focus <- c(
   "3 - High / fresh" = 3
 )
 
-TIME_CHOICES <- c("Quick (under ~45 min)", "Medium (up to ~2 hrs)", "Long / open-ended")
-
-# Suggests active projects whose current stage fits the given location,
-# energy and time available. "Quick" restricts to stages already
-# in_progress.
-#
-# Ranked using the same critical-path logic as the Gantt tab's bottleneck
-# calc, not each project's own isolated slack: a project's urgency is how
-# much schedule buffer is left once you account for every other commitment
-# due at or before its own deadline (cum_hours_needed from
-# critical_pace_by_deadline()), at the user's assumed shared knitting pace.
-# This means the top suggestion can change whenever any project's remaining
-# hours or deadline shifts, even one not shown in the list - it's reflecting
-# real competition for the same hours, not a stable per-project score.
-recommend_projects <- function(projects, stages, sessions, location, energy,
-                                time_available, hours_per_week = 14) {
-  min_portability <- location_min_portability[[location]]
-  max_focus <- energy_max_focus[[energy]]
+# Ranks every active project's current stage using the same critical-path
+# logic as the Gantt tab's bottleneck calc, not each project's own isolated
+# slack: a project's urgency is how much schedule buffer is left once you
+# account for every other commitment due at or before its own deadline
+# (cum_hours_needed from critical_pace_by_deadline()), at the user's
+# assumed shared knitting pace. This means the top suggestion can change
+# whenever any project's remaining hours or deadline shifts, even one not
+# shown in the list - it's reflecting real competition for the same hours,
+# not a stable per-project score.
+recommend_projects <- function(projects, stages, sessions, hours_per_week = 14) {
   current <- current_stage(stages)
   daily_pace <- hours_per_week / 7
 
   candidates <- projects %>%
     filter(status == "active") %>%
-    inner_join(current, by = "project_id") %>%
-    filter(portability >= min_portability, focus <= max_focus)
-
-  if (time_available == "Quick (under ~45 min)") {
-    candidates <- candidates %>% filter(stage_status == "in_progress")
-  }
+    inner_join(current, by = "project_id")
 
   empty_result <- tibble(
     project_id = character(), name = character(), stage_name = character(),
@@ -200,6 +187,7 @@ recommend_projects <- function(projects, stages, sessions, location, energy,
       days_to_here = coalesce(days_to_here, days_left),
       cum_hours_needed = coalesce(cum_hours_needed, remaining_hours, 0),
       critical_slack_days = round(days_to_here - cum_hours_needed / daily_pace, 1),
+      required_pace = round(required_pace, 2),
       row_progress = ifelse(
         !is.na(total_rows),
         paste0("row ", coalesce(rows_done, 0), " of ", total_rows),
