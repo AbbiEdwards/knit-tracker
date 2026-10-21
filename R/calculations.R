@@ -3,26 +3,38 @@ library(lubridate)
 
 # ---- progress ---------------------------------------------------------
 
-# Project completion %, weighted by est_hours per stage (equal weight if
-# blank). done = 1, in_progress = row fraction (or 0.5 without row
-# tracking), not_started = 0.
-project_progress <- function(projects, stages) {
+# Fraction complete for a single stage: done = 1, not_started = 0.
+# in_progress uses real row progress where tracked; otherwise hours logged
+# against est_hours, capped just under 1 so a stage can't visually read as
+# finished before you've actually marked it done. Falls back to a flat 0.5
+# only when there's neither row tracking nor an est_hours to compare against.
+stage_progress_fraction <- function(stages, sessions) {
+  actual <- sessions %>% group_by(stage_id) %>% summarise(actual_hours = sum(hours), .groups = "drop")
   stages %>%
+    left_join(actual, by = "stage_id") %>%
     mutate(
-      weight = ifelse(is.na(est_hours) | est_hours <= 0, 1, est_hours),
-      row_frac = ifelse(
-        !is.na(total_rows) & total_rows > 0,
-        coalesce(rows_done, 0) / total_rows,
-        0.5
+      frac = case_when(
+        status == "done" ~ 1,
+        status == "in_progress" & !is.na(total_rows) & total_rows > 0 ~
+          coalesce(rows_done, 0) / total_rows,
+        status == "in_progress" & !is.na(est_hours) & est_hours > 0 ~
+          pmin(coalesce(actual_hours, 0) / est_hours, 0.95),
+        status == "in_progress" ~ 0.5,
+        TRUE ~ 0
       )
     ) %>%
+    select(-actual_hours)
+}
+
+# Project completion %, weighted by est_hours per stage (equal weight if
+# blank), using stage_progress_fraction() for each stage's own completion.
+project_progress <- function(projects, stages, sessions) {
+  stages %>%
+    mutate(weight = ifelse(is.na(est_hours) | est_hours <= 0, 1, est_hours)) %>%
+    left_join(stage_progress_fraction(stages, sessions) %>% select(stage_id, frac), by = "stage_id") %>%
     group_by(project_id) %>%
     summarise(
-      pct_complete = sum(weight * case_when(
-        status == "done" ~ 1,
-        status == "in_progress" ~ row_frac,
-        TRUE ~ 0
-      )) / sum(weight),
+      pct_complete = sum(weight * frac) / sum(weight),
       n_stages = n(),
       n_done = sum(status == "done"),
       .groups = "drop"
@@ -221,9 +233,12 @@ gantt_data <- function(projects, stages, sessions, hours_per_week = 14) {
 # Remaining hours per project (deadline not yet passed), sorted by deadline,
 # with the cumulative hours needed by each deadline and the pace that would
 # be required, assuming today's hours can be freely allocated to whichever
-# project is due soonest.
+# project is due soonest. Projects with no deadline set (e.g. on hold, or
+# awaiting a pattern) are excluded entirely - an undated project can't be
+# scheduled against a date, and letting it through with a NA deadline would
+# otherwise poison every cumulative sum below with NA.
 critical_pace_by_deadline <- function(projects, stages, sessions) {
-  active <- projects %>% filter(is.na(deadline) | as.Date(deadline) >= Sys.Date())
+  active <- projects %>% filter(!is.na(deadline), as.Date(deadline) >= Sys.Date())
   remaining <- project_remaining_hours(active, stages, sessions)
 
   df <- active %>%
@@ -254,9 +269,10 @@ critical_bottleneck <- function(projects, stages, sessions) {
 # Actual total remaining hours (active projects) on each day since the
 # first logged session, reconstructed as today's total plus hours logged
 # after that day. Paired with an ideal straight-line pace to 0 hours at
-# the furthest deadline.
+# the furthest deadline. Projects with no deadline set are excluded, same
+# reasoning as critical_pace_by_deadline().
 burndown_data <- function(projects, stages, sessions) {
-  active <- projects %>% filter(is.na(deadline) | as.Date(deadline) >= Sys.Date())
+  active <- projects %>% filter(!is.na(deadline), as.Date(deadline) >= Sys.Date())
   remaining_now <- sum(project_remaining_hours(active, stages, sessions)$remaining_hours)
   final_deadline <- suppressWarnings(max(as.Date(active$deadline), na.rm = TRUE))
 

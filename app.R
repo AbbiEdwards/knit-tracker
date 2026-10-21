@@ -186,7 +186,7 @@ ui <- page_navbar(
       ),
       layout_columns(
         col_widths = c(6, 6),
-        selectInput("detail_status", "Status", choices = c("active", "pending", "finished")),
+        selectInput("detail_status", "Status", choices = c("active", "pending", "on_hold", "finished")),
         checkboxInput("detail_ravelry", "Ravelry project page made?")
       ),
       textAreaInput("detail_notes", "Notes"),
@@ -398,7 +398,7 @@ server <- function(input, output, session) {
 
   output$progress_bars <- renderUI({
     not_finished <- not_past_deadline(projects_r())
-    prog <- project_progress(not_finished, stages_r()) %>%
+    prog <- project_progress(not_finished, stages_r(), sessions_r()) %>%
       mutate(days_left = as.numeric(as.Date(deadline) - Sys.Date()))
 
     bars <- lapply(seq_len(nrow(prog)), function(i) {
@@ -510,17 +510,11 @@ server <- function(input, output, session) {
       return(p(em("No stages added yet for this project.")))
     }
     bar_colour <- if (!is.null(input$detail_colour) && nzchar(input$detail_colour)) input$detail_colour else "#C9789A"
+    st <- stage_progress_fraction(st, sessions_r())
 
     segments <- lapply(seq_len(nrow(st)), function(i) {
       row <- st[i, ]
-      frac <- case_when(
-        row$status == "done" ~ 1,
-        row$status == "in_progress" & !is.na(row$total_rows) & row$total_rows > 0 ~
-          coalesce(row$rows_done, 0) / row$total_rows,
-        row$status == "in_progress" ~ 0.5,
-        TRUE ~ 0
-      )
-      pct <- round(frac * 100)
+      pct <- round(row$frac * 100)
       # A mini-deadline's urgency only shows while the stage isn't done.
       border_colour <- "#F1DDE2"
       if (row$status != "done" && !is.na(row$stage_deadline)) {
