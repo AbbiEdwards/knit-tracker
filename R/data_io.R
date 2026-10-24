@@ -2,10 +2,7 @@ library(readr)
 library(dplyr)
 library(lubridate)
 
-# APP_DATA_DIR is set by app.R before sourcing this file.
-if (!exists("APP_DATA_DIR")) {
-  APP_DATA_DIR <- "data"
-}
+APP_DATA_DIR <- "data"
 
 # ---- column specs --------------------------------------------------------
 
@@ -101,9 +98,9 @@ next_id <- function(existing_ids, prefix) {
 }
 
 # A NULL or zero-length value (e.g. a cleared date input) is replaced with
-# na instead of being assigned as-is, which would error on a single row.
-or_na <- function(x, na = NA) {
-  if (is.null(x) || length(x) == 0) na else x
+# NA instead of being assigned as-is, which would error on a single row.
+or_na <- function(x) {
+  if (is.null(x) || length(x) == 0) NA else x
 }
 
 # ---- mutations ---------------------------------------------------------
@@ -163,11 +160,11 @@ edit_project <- function(project_id, name, designer, yarn_weight, needle_size,
   projects$needle_size[i] <- or_na(needle_size)
   projects$gauge[i] <- or_na(gauge)
   projects$size[i] <- or_na(size)
-  projects$pattern_received[i] <- as.Date(or_na(pattern_received, as.Date(NA)))
-  projects$start_date[i] <- as.Date(or_na(start_date, as.Date(NA)))
-  projects$deadline[i] <- as.Date(or_na(deadline, as.Date(NA)))
+  projects$pattern_received[i] <- as.Date(or_na(pattern_received))
+  projects$start_date[i] <- as.Date(or_na(start_date))
+  projects$deadline[i] <- as.Date(or_na(deadline))
   projects$status[i] <- or_na(status)
-  projects$ravelry_project[i] <- or_na(ravelry_project, FALSE)
+  projects$ravelry_project[i] <- isTRUE(ravelry_project)
   projects$colour[i] <- or_na(colour)
   projects$notes[i] <- or_na(notes)
 
@@ -192,7 +189,7 @@ add_stage <- function(project_id, stage_name, stage_category, stage_order, porta
     est_hours = as.numeric(est_hours),
     original_est_hours = as.numeric(est_hours),
     status = "not_started",
-    stage_deadline = as.Date(or_na(stage_deadline, as.Date(NA))),
+    stage_deadline = as.Date(or_na(stage_deadline)),
     total_rows = as.integer(total_rows),
     rows_done = if (is.na(total_rows)) NA_integer_ else 0L
   )
@@ -240,7 +237,7 @@ edit_stage <- function(stage_id, stage_name, stage_category, portability, focus,
   stages$est_hours[i] <- as.numeric(est_hours)
   stages$total_rows[i] <- as.integer(total_rows)
   stages$status[i] <- status
-  stages$stage_deadline[i] <- as.Date(or_na(stage_deadline, as.Date(NA)))
+  stages$stage_deadline[i] <- as.Date(or_na(stage_deadline))
 
   if (is.na(stages$total_rows[i])) {
     stages$rows_done[i] <- NA_integer_

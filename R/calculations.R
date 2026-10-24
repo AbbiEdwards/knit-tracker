@@ -1,5 +1,18 @@
 library(dplyr)
-library(lubridate)
+
+# ---- shared helpers ------------------------------------------------------
+
+# Total hours logged against each stage.
+stage_hours <- function(sessions) {
+  sessions %>% group_by(stage_id) %>% summarise(actual_hours = sum(hours), .groups = "drop")
+}
+
+# Projects whose deadline hasn't passed yet. Undated projects (e.g. on hold)
+# are kept only when include_undated is TRUE: they still belong on Overview,
+# but can't be scheduled against a date.
+upcoming_projects <- function(projects, include_undated = FALSE) {
+  projects %>% filter(coalesce(deadline >= Sys.Date(), include_undated))
+}
 
 # ---- progress ---------------------------------------------------------
 
@@ -9,9 +22,8 @@ library(lubridate)
 # finished before you've actually marked it done. Falls back to a flat 0.5
 # only when there's neither row tracking nor an est_hours to compare against.
 stage_progress_fraction <- function(stages, sessions) {
-  actual <- sessions %>% group_by(stage_id) %>% summarise(actual_hours = sum(hours), .groups = "drop")
   stages %>%
-    left_join(actual, by = "stage_id") %>%
+    left_join(stage_hours(sessions), by = "stage_id") %>%
     mutate(
       frac = case_when(
         status == "done" ~ 1,
@@ -29,16 +41,10 @@ stage_progress_fraction <- function(stages, sessions) {
 # Project completion %, weighted by est_hours per stage (equal weight if
 # blank), using stage_progress_fraction() for each stage's own completion.
 project_progress <- function(projects, stages, sessions) {
-  stages %>%
+  stage_progress_fraction(stages, sessions) %>%
     mutate(weight = ifelse(is.na(est_hours) | est_hours <= 0, 1, est_hours)) %>%
-    left_join(stage_progress_fraction(stages, sessions) %>% select(stage_id, frac), by = "stage_id") %>%
     group_by(project_id) %>%
-    summarise(
-      pct_complete = sum(weight * frac) / sum(weight),
-      n_stages = n(),
-      n_done = sum(status == "done"),
-      .groups = "drop"
-    ) %>%
+    summarise(pct_complete = sum(weight * frac) / sum(weight), .groups = "drop") %>%
     right_join(projects, by = "project_id") %>%
     mutate(pct_complete = coalesce(pct_complete, 0)) %>%
     arrange(deadline)
@@ -51,7 +57,7 @@ project_progress <- function(projects, stages, sessions) {
 hours_per_stage_by_weight <- function(sessions, stages, projects) {
   sessions %>%
     left_join(stages %>% select(stage_id, stage_category), by = "stage_id") %>%
-    left_join(projects %>% select(project_id, yarn_weight, size), by = "project_id") %>%
+    left_join(projects %>% select(project_id, yarn_weight), by = "project_id") %>%
     group_by(yarn_weight, stage_category) %>%
     summarise(total_hours = sum(hours), n_sessions = n(), .groups = "drop") %>%
     mutate(avg_hours_per_session = round(total_hours / n_sessions, 2)) %>%
@@ -62,8 +68,8 @@ hours_per_stage_by_weight <- function(sessions, stages, projects) {
 total_hours_per_project <- function(sessions, projects) {
   sessions %>%
     group_by(project_id) %>%
-    summarise(total_hours = sum(hours), n_sessions = n(), .groups = "drop") %>%
-    right_join(projects %>% select(project_id, name, yarn_weight, size, colour), by = "project_id") %>%
+    summarise(total_hours = sum(hours), .groups = "drop") %>%
+    right_join(projects %>% select(project_id, name, colour), by = "project_id") %>%
     mutate(total_hours = coalesce(total_hours, 0)) %>%
     arrange(desc(total_hours))
 }
@@ -89,10 +95,7 @@ hours_per_day <- function(sessions) {
 estimate_accuracy <- function(stages, sessions, projects) {
   stages %>%
     filter(status == "done", !is.na(original_est_hours)) %>%
-    left_join(
-      sessions %>% group_by(stage_id) %>% summarise(actual_hours = sum(hours), .groups = "drop"),
-      by = "stage_id"
-    ) %>%
+    left_join(stage_hours(sessions), by = "stage_id") %>%
     left_join(projects %>% select(project_id, name), by = "project_id") %>%
     mutate(
       actual_hours = coalesce(actual_hours, 0),
@@ -103,30 +106,24 @@ estimate_accuracy <- function(stages, sessions, projects) {
     arrange(desc(abs(diff_pct)))
 }
 
-# Remaining hours per project: sum of est_hours across not-done stages
-# (in_progress at half weight). Missing est_hours falls back to the average
-# hours per completed stage of that yarn weight, or 4 hours if no history.
+# Remaining hours per project: each stage's est_hours times the share of it
+# still left (from stage_progress_fraction()). Missing est_hours falls back
+# to the average hours per completed stage of that yarn weight, or 4 hours
+# if no history.
 project_remaining_hours <- function(projects, stages, sessions) {
-  hist_avg <- sessions %>%
-    group_by(stage_id) %>%
-    summarise(stage_hours = sum(hours), .groups = "drop") %>%
+  hist_avg <- stage_hours(sessions) %>%
     left_join(stages %>% select(stage_id, project_id, status), by = "stage_id") %>%
     filter(status == "done") %>%
     left_join(projects %>% select(project_id, yarn_weight), by = "project_id") %>%
     group_by(yarn_weight) %>%
-    summarise(avg_hours_per_stage = mean(stage_hours, na.rm = TRUE), .groups = "drop")
+    summarise(avg_hours_per_stage = mean(actual_hours, na.rm = TRUE), .groups = "drop")
 
-  stages %>%
+  stage_progress_fraction(stages, sessions) %>%
     left_join(projects %>% select(project_id, yarn_weight), by = "project_id") %>%
     left_join(hist_avg, by = "yarn_weight") %>%
     mutate(
       fallback = coalesce(avg_hours_per_stage, 4),
-      remaining_factor = case_when(
-        status == "done" ~ 0,
-        status == "in_progress" ~ 0.5,
-        TRUE ~ 1
-      ),
-      stage_remaining = remaining_factor * coalesce(est_hours, fallback)
+      stage_remaining = (1 - frac) * coalesce(est_hours, fallback)
     ) %>%
     group_by(project_id) %>%
     summarise(remaining_hours = sum(stage_remaining), .groups = "drop")
@@ -143,118 +140,51 @@ current_stage <- function(stages) {
     rename(stage_status = status)
 }
 
-# ---- recommender ---------------------------------------------------------
+# ---- deadline pace -------------------------------------------------------
 
-location_min_portability <- c(
-  "1 - Home (space to spread out)" = 1,
-  "2 - Work/Cafe/Gathering (space but limited)" = 2,
-  "3 - On the Move (confined space)" = 3
-)
-
-energy_max_focus <- c(
-  "1 - Low / tired" = 1,
-  "2 - Medium" = 2,
-  "3 - High / fresh" = 3
-)
-
-# Ranks every active project's current stage using the same critical-path
-# logic as the Gantt tab's bottleneck calc, not each project's own isolated
-# slack: a project's urgency is how much schedule buffer is left once you
-# account for every other commitment due at or before its own deadline
-# (cum_hours_needed from critical_pace_by_deadline()), at the user's
-# assumed shared knitting pace. This means the top suggestion can change
-# whenever any project's remaining hours or deadline shifts, even one not
-# shown in the list - it's reflecting real competition for the same hours,
-# not a stable per-project score.
-recommend_projects <- function(projects, stages, sessions, hours_per_week = 14) {
-  current <- current_stage(stages)
-  daily_pace <- hours_per_week / 7
-
-  candidates <- projects %>%
-    filter(status == "active") %>%
-    inner_join(current, by = "project_id")
-
-  empty_result <- tibble(
-    project_id = character(), name = character(), stage_name = character(),
-    row_progress = character(), portability = integer(), focus = integer(),
-    deadline = as.Date(character()), days_left = numeric(),
-    critical_slack_days = numeric(), required_pace = numeric()
-  )
-  if (nrow(candidates) == 0) {
-    return(empty_result)
-  }
-
-  cp <- critical_pace_by_deadline(projects, stages, sessions)
-  own_remaining <- project_remaining_hours(projects, stages, sessions)
-
-  # A candidate whose deadline has already passed (but is still marked
-  # active) won't appear in cp, which only covers upcoming deadlines - fall
-  # back to its own remaining hours so it still surfaces as urgent instead
-  # of silently dropping to the bottom via an NA slack.
-  candidates %>%
-    left_join(cp %>% select(project_id, days_to_here, cum_hours_needed, required_pace), by = "project_id") %>%
-    left_join(own_remaining, by = "project_id") %>%
-    mutate(
-      days_left = as.numeric(as.Date(deadline) - Sys.Date()),
-      days_to_here = coalesce(days_to_here, days_left),
-      cum_hours_needed = coalesce(cum_hours_needed, remaining_hours, 0),
-      critical_slack_days = round(days_to_here - cum_hours_needed / daily_pace, 1),
-      required_pace = round(required_pace, 2),
-      row_progress = ifelse(
-        !is.na(total_rows),
-        paste0("row ", coalesce(rows_done, 0), " of ", total_rows),
-        NA
-      )
-    ) %>%
-    arrange(critical_slack_days, days_left) %>%
-    select(project_id, name, stage_name, row_progress, portability, focus, deadline, days_left, critical_slack_days, required_pace)
+# Upcoming-deadline projects with their current remaining hours: the pool
+# that the deadline-pace calculations schedule against. counts_from is the
+# day a project joined your workload (its pattern-received date, or today if
+# that's set in the future); NA means it has always counted.
+upcoming_pool <- function(projects, stages, sessions) {
+  upcoming <- upcoming_projects(projects)
+  upcoming %>%
+    left_join(project_remaining_hours(upcoming, stages, sessions), by = "project_id") %>%
+    mutate(remaining_hours = coalesce(remaining_hours, 0), counts_from = pmin(pattern_received, Sys.Date())) %>%
+    select(project_id, name, deadline, remaining_hours, counts_from)
 }
 
-# ---- gantt data ---------------------------------------------------------
-
-# Per active project: a bar from today to the estimated finish date at
-# hours_per_week, plus the real deadline.
-gantt_data <- function(projects, stages, sessions, hours_per_week = 14) {
-  remaining <- project_remaining_hours(projects, stages, sessions)
-
-  projects %>%
-    filter(status == "active") %>%
-    left_join(remaining, by = "project_id") %>%
-    mutate(
-      remaining_hours = coalesce(remaining_hours, 0),
-      est_days_needed = pmax(1, ceiling(remaining_hours / hours_per_week * 7)),
-      start = Sys.Date(),
-      finish_if_started_now = Sys.Date() + est_days_needed,
-      deadline = as.Date(deadline)
-    ) %>%
-    select(project_id, name, start, finish_if_started_now, deadline, remaining_hours)
+# The pool as it stood on a past day: only projects that had joined your
+# workload by then, each with today's remaining hours plus whatever was
+# logged against it after that day. Stages added, estimates revised or
+# deadlines changed since then aren't reflected.
+pool_on <- function(pool, sessions, d) {
+  pool %>%
+    filter(is.na(counts_from) | counts_from <= d) %>%
+    mutate(remaining_hours = remaining_hours + vapply(
+      project_id,
+      function(id) sum(sessions$hours[sessions$project_id == id & sessions$date > d]),
+      numeric(1)
+    ))
 }
 
-# Remaining hours per project (deadline not yet passed), sorted by deadline,
-# with the cumulative hours needed by each deadline and the pace that would
-# be required, assuming today's hours can be freely allocated to whichever
-# project is due soonest. Projects with no deadline set (e.g. on hold, or
-# awaiting a pattern) are excluded entirely - an undated project can't be
-# scheduled against a date, and letting it through with a NA deadline would
-# otherwise poison every cumulative sum below with NA.
-critical_pace_by_deadline <- function(projects, stages, sessions) {
-  active <- projects %>% filter(!is.na(deadline), as.Date(deadline) >= Sys.Date())
-  remaining <- project_remaining_hours(active, stages, sessions)
-
-  df <- active %>%
-    left_join(remaining, by = "project_id") %>%
-    mutate(remaining_hours = coalesce(remaining_hours, 0), deadline = as.Date(deadline)) %>%
-    select(project_id, name, deadline, remaining_hours) %>%
-    arrange(deadline)
-
-  df %>%
-    rowwise() %>%
+# For a pool of projects, as of a given date: the hours needed across
+# everything due by each deadline, and the daily pace that requires.
+# Projects sharing a deadline share the same total.
+deadline_pace <- function(pool, as_of = Sys.Date()) {
+  pool %>%
+    arrange(deadline) %>%
     mutate(
-      days_to_here = as.numeric(deadline - Sys.Date()),
-      cum_hours_needed = sum(df$remaining_hours[df$deadline <= deadline]),
+      days_to_here = as.numeric(deadline - as_of),
+      cum_hours_needed = vapply(deadline, function(d) sum(remaining_hours[deadline <= d]), numeric(1)),
       required_pace = ifelse(days_to_here > 0, cum_hours_needed / days_to_here, Inf)
-    ) %>%
-    ungroup()
+    )
+}
+
+# Each upcoming deadline with the pace required from today, assuming hours
+# always go to whichever project is due soonest.
+critical_pace_by_deadline <- function(projects, stages, sessions) {
+  deadline_pace(upcoming_pool(projects, stages, sessions))
 }
 
 # The single tightest deadline: the one needing the highest sustained daily
@@ -264,30 +194,76 @@ critical_bottleneck <- function(projects, stages, sessions) {
   cp[which.max(cp$required_pace), ]
 }
 
-# ---- burndown ---------------------------------------------------------
-
-# Actual total remaining hours (active projects) on each day since the
-# first logged session, reconstructed as today's total plus hours logged
-# after that day. Paired with an ideal straight-line pace to 0 hours at
-# the furthest deadline. Projects with no deadline set are excluded, same
-# reasoning as critical_pace_by_deadline().
-burndown_data <- function(projects, stages, sessions) {
-  active <- projects %>% filter(!is.na(deadline), as.Date(deadline) >= Sys.Date())
-  remaining_now <- sum(project_remaining_hours(active, stages, sessions)$remaining_hours)
-  final_deadline <- suppressWarnings(max(as.Date(active$deadline), na.rm = TRUE))
-
-  # Nothing to plot without at least one project with a real deadline.
-  if (!is.finite(final_deadline)) {
-    return(tibble(date = as.Date(character()), hours = numeric(), line = character()))
+# The pace that would have been needed, on each day since the first logged
+# session, to hit every upcoming deadline (using pool_on() for each day).
+historical_required_pace <- function(projects, stages, sessions) {
+  pool <- upcoming_pool(projects, stages, sessions)
+  if (nrow(pool) == 0 || nrow(sessions) == 0) {
+    return(tibble(date = as.Date(character()), required_pace = numeric()))
   }
 
+  # A deadline falling on the day itself gives an infinite pace, which is
+  # left out rather than letting it swamp that day's figure. NA (a gap in
+  # the line) on days before any project had joined.
+  pace_on <- function(d) {
+    pace <- deadline_pace(pool_on(pool, sessions, d), as_of = d)$required_pace
+    pace <- pace[is.finite(pace)]
+    if (length(pace) == 0) NA_real_ else max(pace)
+  }
+
+  dates <- seq(min(sessions$date), Sys.Date(), by = "day")
+  tibble(date = dates, required_pace = vapply(dates, pace_on, numeric(1)))
+}
+
+# ---- recommender ---------------------------------------------------------
+
+# Ranks every active project's current stage by critical-path slack: the
+# schedule buffer left once every commitment due at or before its deadline
+# is accounted for (cum_hours_needed), at the assumed daily pace. The top
+# pick can change when any project's remaining hours or deadline shifts,
+# because all projects compete for the same hours.
+recommend_projects <- function(projects, stages, sessions, daily_pace = 2) {
+  cp <- critical_pace_by_deadline(projects, stages, sessions)
+  own_remaining <- project_remaining_hours(projects, stages, sessions)
+
+  # An active project whose deadline has passed isn't in cp, so it falls
+  # back to its own remaining hours and still surfaces as urgent, rather
+  # than sorting last with an NA slack.
+  projects %>%
+    filter(status == "active") %>%
+    inner_join(current_stage(stages), by = "project_id") %>%
+    left_join(cp %>% select(project_id, cum_hours_needed, required_pace), by = "project_id") %>%
+    left_join(own_remaining, by = "project_id") %>%
+    mutate(
+      days_left = as.numeric(deadline - Sys.Date()),
+      cum_hours_needed = coalesce(cum_hours_needed, remaining_hours),
+      critical_slack_days = round(days_left - cum_hours_needed / daily_pace, 1),
+      row_progress = ifelse(!is.na(total_rows), paste0("row ", coalesce(rows_done, 0), " of ", total_rows), NA)
+    ) %>%
+    arrange(critical_slack_days, days_left) %>%
+    select(project_id, name, stage_name, row_progress, portability, focus, deadline, days_left, critical_slack_days, required_pace)
+}
+
+# ---- burndown ---------------------------------------------------------
+
+# Total remaining hours across projects with an upcoming deadline (the same
+# pool as the Capacity figure) on each day since the first logged session,
+# using pool_on() for each day, so taking on a new project shows as a step
+# up on the day it arrived. Paired with an ideal straight-line pace to 0
+# hours at the furthest deadline.
+burndown_data <- function(projects, stages, sessions) {
+  pool <- upcoming_pool(projects, stages, sessions)
+  if (nrow(pool) == 0) {
+    return(tibble(date = as.Date(character()), hours = numeric(), line = character()))
+  }
+  final_deadline <- max(pool$deadline)
+
   start_date <- if (nrow(sessions) == 0) Sys.Date() else min(sessions$date)
-  actual_dates <- seq(start_date, Sys.Date(), by = "day")
-  actual <- tibble(date = actual_dates) %>%
-    rowwise() %>%
-    mutate(hours = remaining_now + sum(sessions$hours[sessions$date > date])) %>%
-    ungroup() %>%
-    mutate(line = "Actual")
+  actual <- tibble(date = seq(start_date, Sys.Date(), by = "day")) %>%
+    mutate(
+      hours = vapply(date, function(d) sum(pool_on(pool, sessions, d)$remaining_hours), numeric(1)),
+      line = "Actual"
+    )
 
   ideal_dates <- seq(start_date, final_deadline, by = "day")
   start_hours <- actual$hours[1]
