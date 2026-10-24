@@ -209,7 +209,7 @@ ui <- page_navbar(
     "Capacity",
     card(
       card_header("Can I hit every deadline?"),
-      p("The minimum daily pace you'd need to sustain, starting today, to hit every deadline in turn - assuming you always work on whichever is most urgent. Whichever project sets this number is your real bottleneck, not necessarily whichever deadline is soonest."),
+      p("The minimum daily pace you'd need to sustain, starting today, to hit every deadline in turn - assuming you always work on whichever is most urgent. Whichever project sets this number is your real bottleneck, not necessarily whichever deadline is soonest. Next to it: how far ahead of or behind the burndown's ideal line you are today."),
       uiOutput("critical_pace_summary")
     ),
     card(
@@ -551,17 +551,33 @@ server <- function(input, output, session) {
 
   # ---- Capacity ----
 
+  burndown_r <- reactive(burndown_data(projects_r(), stages_r(), sessions_r()))
+
   output$critical_pace_summary <- renderUI({
     bn <- critical_bottleneck(projects_r(), stages_r(), sessions_r())
     if (nrow(bn) == 0) {
       return(p(em("No active projects with a deadline yet.")))
     }
     pace_colour <- if (bn$required_pace > 3) URGENCY_COLOURS[["red"]] else if (bn$required_pace > 2) URGENCY_COLOURS[["amber"]] else URGENCY_COLOURS[["safe"]]
+
+    # Today's gap between the burndown's actual and ideal lines.
+    today <- burndown_r() %>% filter(date == Sys.Date())
+    behind <- today$hours[today$line == "Actual"] - today$hours[today$line == "Ideal"]
+    behind_text <- if (abs(behind) < 0.5) "On track" else paste0(round(abs(behind), 1), "h ", if (behind > 0) "behind" else "ahead")
+    behind_colour <- if (behind > 10) URGENCY_COLOURS[["red"]] else if (behind >= 0.5) URGENCY_COLOURS[["amber"]] else URGENCY_COLOURS[["safe"]]
+
+    stat <- function(value, colour, label) {
+      div(
+        div(style = paste0("font-size:28px; font-weight:700; color:", colour, ";"), value),
+        p(class = "caption", label)
+      )
+    }
     unstaged <- upcoming_projects(projects_r()) %>% filter(!project_id %in% stages_r()$project_id)
     tagList(
       div(
-        style = paste0("font-size:28px; font-weight:700; color:", pace_colour, ";"),
-        paste0(round(bn$required_pace, 2), " h/day")
+        style = "display:flex; gap:48px; flex-wrap:wrap;",
+        stat(paste0(round(bn$required_pace, 2), " h/day"), pace_colour, "needed from today to hit every deadline"),
+        stat(behind_text, behind_colour, "compared with the ideal line on the burndown below")
       ),
       p(
         style = "font-size:13px; color:#8A6E78;",
@@ -580,7 +596,7 @@ server <- function(input, output, session) {
   })
 
   output$burndown_plot <- renderPlotly({
-    bd <- burndown_data(projects_r(), stages_r(), sessions_r())
+    bd <- burndown_r()
     if (nrow(bd) == 0) {
       return(plotly_empty())
     }
