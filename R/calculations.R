@@ -249,8 +249,9 @@ recommend_projects <- function(projects, stages, sessions, daily_pace = 2) {
 # Total remaining hours across projects with an upcoming deadline (the same
 # pool as the Capacity figure) on each day since the first logged session,
 # using pool_on() for each day, so taking on a new project shows as a step
-# up on the day it arrived. Paired with an ideal straight-line pace to 0
-# hours at the furthest deadline.
+# up on the day it arrived. The ideal line burns each project's hours down
+# from the day it joined to 0 at the furthest deadline, so it steps up by
+# the same amount: being above it means behind on pace, not more work.
 burndown_data <- function(projects, stages, sessions) {
   pool <- upcoming_pool(projects, stages, sessions)
   if (nrow(pool) == 0) {
@@ -265,14 +266,18 @@ burndown_data <- function(projects, stages, sessions) {
       line = "Actual"
     )
 
-  ideal_dates <- seq(start_date, final_deadline, by = "day")
-  start_hours <- actual$hours[1]
-  span_days <- as.numeric(final_deadline - start_date)
-  ideal <- tibble(date = ideal_dates) %>%
-    mutate(
-      hours = pmax(0, start_hours * (1 - as.numeric(date - start_date) / span_days)),
-      line = "Ideal"
-    )
+  joined <- pmax(coalesce(pool$counts_from, start_date), start_date)
+  hours_at_join <- vapply(seq_len(nrow(pool)), function(i) {
+    on_join <- pool_on(pool, sessions, joined[i])
+    on_join$remaining_hours[on_join$project_id == pool$project_id[i]]
+  }, numeric(1))
+  ideal_on <- function(d) {
+    span <- as.numeric(final_deadline - joined)
+    share_left <- ifelse(span > 0, pmax(0, 1 - as.numeric(d - joined) / span), 0)
+    sum((hours_at_join * share_left)[joined <= d])
+  }
+  ideal <- tibble(date = seq(start_date, final_deadline, by = "day")) %>%
+    mutate(hours = vapply(date, ideal_on, numeric(1)), line = "Ideal")
 
   bind_rows(actual, ideal)
 }
